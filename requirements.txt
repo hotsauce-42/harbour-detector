@@ -1,0 +1,12 @@
+duckdb>=0.10.0
+pandas>=2.0.0
+pyarrow>=14.0.0
+numpy>=1.26.0
+pydantic>=2.0.0
+pyyaml>=6.0
+# Phase 2+
+h3>=4.0.0
+geopandas>=0.14.0
+shapely>=2.0.0
+reverse_geocoder>=1.5.1
+pycountry>=22.0

@@ -1,0 +1,54 @@
+data:
+  raw_glob: "data/raw/**/*.parquet"
+  interim_dir: "data/interim"
+  reference_dir: "data/reference"
+  output_dir: "data/output"
+
+# Column name mapping — adjust to match your actual Parquet schema
+columns:
+  mmsi: mmsi
+  timestamp: timestamp
+  lat: lat
+  lon: lon
+  sog: sog
+  nav_status: nav_status
+  msg_type: msg_type
+  draught: draught
+  destination: destination
+  ship_type: ship_type
+
+phase1:
+  # Strategy A: nav_status filter
+  moored_nav_statuses: [1, 5]       # 1=at anchor, 5=moored
+
+  # Both strategies: low-speed threshold
+  sog_threshold_knots: 0.5
+
+  # Stop segment grouping
+  max_gap_minutes: 15               # gap between messages that still belongs to same stop
+  min_stop_duration_minutes: 30     # discard stops shorter than this
+  min_messages_per_stop: 3          # discard stops with too few messages
+  positional_variance_max_meters: 300  # discard stops where ship was still moving around
+
+  # MMSI validity filter
+  mmsi_min: 100000000
+  mmsi_max: 999999999
+
+  # Draught join: how far before/after a stop to look for type 5 messages
+  draught_lookup_hours: 6
+
+phase2:
+  h3_resolution: 11
+  min_unique_mmsi: 5               # minimum unique vessels to consider a cell a harbour
+
+phase3:
+  # connected component thresholds (tuned in later phase)
+  min_cells_per_harbour: 1
+
+phase4:
+  city_min_population: 1000        # minimum population for "nearest city" lookup
+
+phase5:
+  # ID matching thresholds
+  h3_jaccard_threshold: 0.3        # minimum H3 cell overlap to match existing harbour
+  centroid_match_distance_meters: 500
