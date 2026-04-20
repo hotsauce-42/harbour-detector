@@ -52,3 +52,24 @@ phase5:
   # ID matching thresholds
   h3_jaccard_threshold: 0.3        # minimum H3 cell overlap to match existing harbour
   centroid_match_distance_meters: 500
+
+gui:
+  output_file: "data/output/harbours.geojson"
+  default_tile: "OpenStreetMap"
+  map_tiles:
+    - name: "OpenStreetMap"
+      url: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+      attribution: "© <a href='https://www.openstreetmap.org/copyright'>OpenStreetMap</a> contributors"
+    - name: "CartoDB Positron"
+      url: "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
+      attribution: "© <a href='https://carto.com/'>CARTO</a>"
+    - name: "CartoDB Dark"
+      url: "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
+      attribution: "© <a href='https://carto.com/'>CARTO</a>"
+    - name: "Esri Satellite"
+      url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+      attribution: "© Esri, Maxar, Earthstar Geographics"
+    # Add custom tile servers here, e.g.:
+    # - name: "My Server"
+    #   url: "https://mytiles.example.com/{z}/{x}/{y}.png"
+    #   attribution: "© My Company"
