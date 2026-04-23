@@ -1,3 +1,4 @@
+![Harbour Detector](harbour-detector-banner.png)
 # Harbour Detector
 
 Detects and maps harbours worldwide from historical AIS data. The pipeline processes decoded AIS position and voyage messages, clusters ship-stopping events spatially using H3 hexagons, enriches each cluster with country/city metadata, and outputs a GeoJSON file with stable harbour IDs.

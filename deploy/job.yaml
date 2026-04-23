@@ -41,7 +41,6 @@ spec:
         - name: harbour-detector
           image: myregistry.io/harbour-detector:1.0.0
           imagePullPolicy: Always
-
           resources:
             requests:
               cpu: "2"
@@ -49,7 +48,6 @@ spec:
             limits:
               cpu: "4"
               memory: "8Gi"
-
           env:
             # ── S3 data paths ──────────────────────────────────────────────
             # Override the defaults baked into config/settings.yaml.
