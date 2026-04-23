@@ -18,7 +18,7 @@ Existing harbour database format (Parquet or GeoJSON):
 import json
 import logging
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -30,6 +30,14 @@ from shapely.geometry import mapping
 from shapely.wkt import loads as from_wkt
 
 from utils.geo import haversine_meters
+from utils.s3 import (
+    build_s3_config,
+    ensure_dir,
+    get_s3_filesystem,
+    get_s3_storage_options,
+    is_s3_path,
+    path_join,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +71,7 @@ class Phase5Config:
     existing_db_path: Optional[str] = None
     h3_jaccard_threshold: float = 0.3
     centroid_match_distance_meters: float = 500.0
+    s3_cfg: dict = field(default_factory=dict)
 
     @classmethod
     def from_yaml(cls, cfg: dict) -> "Phase5Config":
@@ -74,6 +83,7 @@ class Phase5Config:
             existing_db_path=p5.get("existing_db_path"),
             h3_jaccard_threshold=p5.get("h3_jaccard_threshold", 0.3),
             centroid_match_distance_meters=p5.get("centroid_match_distance_meters", 500.0),
+            s3_cfg=build_s3_config(cfg.get("s3", {})),
         )
 
 
@@ -90,43 +100,39 @@ def make_harbour_id(centroid_h3_r8: str) -> str:
 # Load existing harbour database
 # ---------------------------------------------------------------------------
 
-def _load_existing_db(path: str) -> pd.DataFrame:
+def _load_existing_db(path: str, s3_cfg: dict) -> pd.DataFrame:
     """
     Load an existing harbour database from Parquet or GeoJSON.
     Returns a DataFrame with at minimum: harbour_id, centroid_lat, centroid_lon.
     h3_cells column (list<str>) is used when present.
+    Accepts both local paths and s3:// URIs.
     """
-    p = Path(path)
-    if not p.exists():
-        raise FileNotFoundError(f"Existing harbour DB not found: {path}")
+    suffix = Path(path).suffix.lower()
 
-    suffix = p.suffix.lower()
-
-    if suffix == ".parquet":
-        df = pd.read_parquet(p)
-
-    elif suffix in (".geojson", ".json"):
-        with open(p) as f:
-            fc = json.load(f)
-        rows = []
-        for feat in fc.get("features", []):
-            props = feat.get("properties", {})
-            geom  = feat.get("geometry")
-            row = dict(props)
-            # Derive centroid from geometry if not present in properties
-            if "centroid_lat" not in row and geom:
-                from shapely.geometry import shape as _shape
-                try:
-                    c = _shape(geom).centroid
-                    row.setdefault("centroid_lat", c.y)
-                    row.setdefault("centroid_lon", c.x)
-                except Exception:
-                    pass
-            rows.append(row)
-        df = pd.DataFrame(rows)
-
+    if is_s3_path(path):
+        fs = get_s3_filesystem(s3_cfg)
+        if not fs.exists(path):
+            raise FileNotFoundError(f"Existing harbour DB not found: {path}")
+        if suffix == ".parquet":
+            df = pd.read_parquet(path, storage_options=get_s3_storage_options(s3_cfg))
+        elif suffix in (".geojson", ".json"):
+            with fs.open(path, "r") as f:
+                fc = json.load(f)
+            df = _geojson_to_df(fc)
+        else:
+            raise ValueError(f"Unsupported existing DB format: {suffix}. Use .parquet or .geojson")
     else:
-        raise ValueError(f"Unsupported existing DB format: {suffix}. Use .parquet or .geojson")
+        p = Path(path)
+        if not p.exists():
+            raise FileNotFoundError(f"Existing harbour DB not found: {path}")
+        if suffix == ".parquet":
+            df = pd.read_parquet(p)
+        elif suffix in (".geojson", ".json"):
+            with open(p) as f:
+                fc = json.load(f)
+            df = _geojson_to_df(fc)
+        else:
+            raise ValueError(f"Unsupported existing DB format: {suffix}. Use .parquet or .geojson")
 
     required = {"harbour_id"}
     missing = required - set(df.columns)
@@ -135,6 +141,24 @@ def _load_existing_db(path: str) -> pd.DataFrame:
 
     logger.info("Loaded existing harbour DB: %d harbours from %s", len(df), path)
     return df
+
+
+def _geojson_to_df(fc: dict) -> pd.DataFrame:
+    rows = []
+    for feat in fc.get("features", []):
+        props = feat.get("properties", {})
+        geom  = feat.get("geometry")
+        row = dict(props)
+        if "centroid_lat" not in row and geom:
+            from shapely.geometry import shape as _shape
+            try:
+                c = _shape(geom).centroid
+                row.setdefault("centroid_lat", c.y)
+                row.setdefault("centroid_lon", c.x)
+            except Exception:
+                pass
+        rows.append(row)
+    return pd.DataFrame(rows)
 
 
 # ---------------------------------------------------------------------------
@@ -278,8 +302,8 @@ def _assign_ids(
 # Write outputs
 # ---------------------------------------------------------------------------
 
-def _write_parquet(df: pd.DataFrame, out_dir: Path) -> Path:
-    out_path = out_dir / "harbours.parquet"
+def _write_parquet(df: pd.DataFrame, out_dir: str, s3_cfg: dict) -> str:
+    out_path = path_join(out_dir, "harbours.parquet")
     h3_cells_array = pa.array(df["h3_cells"].tolist(), type=pa.list_(pa.string()))
 
     table = pa.table(
@@ -303,13 +327,18 @@ def _write_parquet(df: pd.DataFrame, out_dir: Path) -> Path:
         },
         schema=OUTPUT_SCHEMA,
     )
-    pq.write_table(table, out_path, compression="snappy")
+    if is_s3_path(out_dir):
+        fs = get_s3_filesystem(s3_cfg)
+        with fs.open(out_path, "wb") as fh:
+            pq.write_table(table, fh, compression="snappy")
+    else:
+        pq.write_table(table, out_path, compression="snappy")
     logger.info("Wrote harbours.parquet → %s", out_path)
     return out_path
 
 
-def _write_geojson(df: pd.DataFrame, out_dir: Path) -> Path:
-    out_path = out_dir / "harbours.geojson"
+def _write_geojson(df: pd.DataFrame, out_dir: str, s3_cfg: dict) -> str:
+    out_path = path_join(out_dir, "harbours.geojson")
 
     features = []
     for _, row in df.iterrows():
@@ -347,8 +376,13 @@ def _write_geojson(df: pd.DataFrame, out_dir: Path) -> Path:
 
     geojson = {"type": "FeatureCollection", "features": features}
 
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(geojson, f, ensure_ascii=False, indent=2)
+    if is_s3_path(out_dir):
+        fs = get_s3_filesystem(s3_cfg)
+        with fs.open(out_path, "wb") as fh:
+            fh.write(json.dumps(geojson, ensure_ascii=False, indent=2).encode("utf-8"))
+    else:
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(geojson, f, ensure_ascii=False, indent=2)
 
     logger.info("Wrote harbours.geojson (%d features) → %s", len(features), out_path)
     return out_path
@@ -358,18 +392,21 @@ def _write_geojson(df: pd.DataFrame, out_dir: Path) -> Path:
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def run_phase5(config: Phase5Config) -> tuple[Path, Path]:
+def run_phase5(config: Phase5Config) -> tuple[str, str]:
     """
     Returns (parquet_path, geojson_path).
     """
-    enriched_path = Path(config.interim_dir) / "harbours_enriched.parquet"
-    if not enriched_path.exists():
+    enriched_path = path_join(config.interim_dir, "harbours_enriched.parquet")
+    if not is_s3_path(config.interim_dir) and not Path(enriched_path).exists():
         raise FileNotFoundError(
             f"harbours_enriched.parquet not found at {enriched_path} — run phase4 first"
         )
 
     logger.info("Phase 5: reading %s …", enriched_path)
-    enriched = pd.read_parquet(enriched_path)
+    if is_s3_path(config.interim_dir):
+        enriched = pd.read_parquet(enriched_path, storage_options=get_s3_storage_options(config.s3_cfg))
+    else:
+        enriched = pd.read_parquet(enriched_path)
     logger.info("  loaded %d enriched clusters", len(enriched))
 
     # Load existing harbour DB (optional)
@@ -377,7 +414,7 @@ def run_phase5(config: Phase5Config) -> tuple[Path, Path]:
     centroid_list: list[dict]     = []
 
     if config.existing_db_path:
-        existing = _load_existing_db(config.existing_db_path)
+        existing = _load_existing_db(config.existing_db_path, config.s3_cfg)
         cell_index, centroid_list = _build_indexes(existing)
     else:
         logger.info("No existing harbour DB supplied — all IDs will be newly generated.")
@@ -386,10 +423,9 @@ def run_phase5(config: Phase5Config) -> tuple[Path, Path]:
     result = _assign_ids(enriched, cell_index, centroid_list, config)
 
     # Write outputs
-    out_dir = Path(config.output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    ensure_dir(config.output_dir)
 
-    parquet_path = _write_parquet(result, out_dir)
-    geojson_path = _write_geojson(result, out_dir)
+    parquet_path = _write_parquet(result, config.output_dir, config.s3_cfg)
+    geojson_path = _write_geojson(result, config.output_dir, config.s3_cfg)
 
     return parquet_path, geojson_path

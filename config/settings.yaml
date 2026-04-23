@@ -53,6 +53,23 @@ phase5:
   h3_jaccard_threshold: 0.3        # minimum H3 cell overlap to match existing harbour
   centroid_match_distance_meters: 500
 
+s3:
+  # Leave blank to use environment variables or IAM instance roles.
+  # Values here take precedence over environment variables.
+  # Corresponding env vars: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
+  #                         AWS_DEFAULT_REGION, S3_ENDPOINT_URL
+  # For local credentials, copy .env.example → .env and fill it in.
+  access_key_id:     ""
+  secret_access_key: ""
+  region:            ""   # defaults to us-east-1 when blank
+  endpoint_url:      ""   # set for MinIO, e.g. http://localhost:9000
+
+  # To route the pipeline through S3, change data.raw_glob / interim_dir /
+  # output_dir to S3 URIs, e.g.:
+  #   raw_glob:    "s3://my-bucket/ais/**/*.parquet"
+  #   interim_dir: "s3://my-bucket/harbour-detector/interim"
+  #   output_dir:  "s3://my-bucket/harbour-detector/output"
+
 gui:
   output_file: "data/output/harbours.geojson"
   default_tile: "OpenStreetMap"

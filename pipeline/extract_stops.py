@@ -22,6 +22,14 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from utils.geo import positional_variance_meters
+from utils.s3 import (
+    build_s3_config,
+    configure_duckdb_s3,
+    ensure_dir,
+    get_s3_filesystem,
+    is_s3_path,
+    path_join,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +58,7 @@ STOP_SCHEMA = pa.schema([
 class Phase1Config:
     raw_glob: str
     interim_dir: str
+    s3_cfg: dict = field(default_factory=dict)
 
     # column name mapping
     col_mmsi: str = "mmsi"
@@ -81,6 +90,7 @@ class Phase1Config:
         return cls(
             raw_glob=data.get("raw_glob", "data/raw/**/*.parquet"),
             interim_dir=data.get("interim_dir", "data/interim"),
+            s3_cfg=build_s3_config(cfg.get("s3", {})),
             col_mmsi=cols.get("mmsi", "mmsi"),
             col_timestamp=cols.get("timestamp", "timestamp"),
             col_lat=cols.get("lat", "lat"),
@@ -137,6 +147,8 @@ def _bulk_extract(config: Phase1Config) -> pd.DataFrame:
 
     logger.info("DuckDB: scanning %s for candidate rows …", c.raw_glob)
     con = duckdb.connect()
+    if is_s3_path(c.raw_glob):
+        configure_duckdb_s3(con, config.s3_cfg)
     df = con.execute(sql).df()
     con.close()
 
@@ -193,6 +205,8 @@ def _extract_type5_data(config: Phase1Config) -> pd.DataFrame:
 
     logger.info("DuckDB: extracting type-5 messages (draught, destination, ship_type) …")
     con = duckdb.connect()
+    if is_s3_path(c.raw_glob):
+        configure_duckdb_s3(con, config.s3_cfg)
     df = con.execute(sql).df()
     con.close()
 
@@ -420,10 +434,9 @@ def _join_type5_data(stops: pd.DataFrame, type5: pd.DataFrame, config: Phase1Con
 # Step 5: write output
 # ---------------------------------------------------------------------------
 
-def _write_stops(stops: pd.DataFrame, config: Phase1Config) -> Path:
-    out_dir = Path(config.interim_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / "stops.parquet"
+def _write_stops(stops: pd.DataFrame, config: Phase1Config) -> str:
+    ensure_dir(config.interim_dir)
+    out_path = path_join(config.interim_dir, "stops.parquet")
 
     # Cast to schema types
     stops = stops.copy()
@@ -435,7 +448,12 @@ def _write_stops(stops: pd.DataFrame, config: Phase1Config) -> Path:
     stops["ship_type"]   = pd.to_numeric(stops.get("ship_type"), errors="coerce").astype("Int16")
 
     table = pa.Table.from_pandas(stops, schema=STOP_SCHEMA, safe=False)
-    pq.write_table(table, out_path, compression="snappy")
+    if is_s3_path(config.interim_dir):
+        fs = get_s3_filesystem(config.s3_cfg)
+        with fs.open(out_path, "wb") as fh:
+            pq.write_table(table, fh, compression="snappy")
+    else:
+        pq.write_table(table, out_path, compression="snappy")
     logger.info("Wrote %d stop events → %s", len(stops), out_path)
     return out_path
 
@@ -444,7 +462,7 @@ def _write_stops(stops: pd.DataFrame, config: Phase1Config) -> Path:
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def run_phase1(config: Phase1Config) -> Path:
+def run_phase1(config: Phase1Config) -> str:
     """
     Execute Phase 1 end-to-end.
     Returns the path to stops.parquet.

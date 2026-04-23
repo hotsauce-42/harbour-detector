@@ -1,0 +1,89 @@
+# Kubernetes Job — harbour-detector full pipeline (all five phases).
+#
+# Prerequisites:
+#   kubectl apply -f deploy/secret.yaml   # create the S3 credential secret first
+#
+# Deploy:
+#   kubectl apply -f deploy/job.yaml
+#
+# Follow logs:
+#   kubectl logs -f job/harbour-detector
+#
+# Delete after completion:
+#   kubectl delete -f deploy/job.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: harbour-detector
+  namespace: ais
+  labels:
+    app: harbour-detector
+spec:
+  # Total attempts before the Job is marked Failed.
+  # Each attempt creates a fresh pod; intermediate S3 files from earlier
+  # phases are already written, so later phases skip re-work on retry.
+  backoffLimit: 2
+
+  # Hard deadline for the entire Job (24 hours).
+  # Increase for very large datasets.
+  activeDeadlineSeconds: 86400
+
+  template:
+    metadata:
+      labels:
+        app: harbour-detector
+    spec:
+      # Never restart the container in-place; a new pod is created on failure
+      # so logs from the failed attempt are preserved.
+      restartPolicy: Never
+
+      containers:
+        - name: harbour-detector
+          image: myregistry.io/harbour-detector:1.0.0
+          imagePullPolicy: Always
+
+          resources:
+            requests:
+              cpu: "2"
+              memory: "4Gi"
+            limits:
+              cpu: "4"
+              memory: "8Gi"
+
+          env:
+            # ── S3 data paths ──────────────────────────────────────────────
+            # Override the defaults baked into config/settings.yaml.
+            - name: RAW_GLOB
+              value: "s3://my-bucket/ais/**/*.parquet"
+            - name: INTERIM_DIR
+              value: "s3://my-bucket/harbour-detector/interim"
+            - name: OUTPUT_DIR
+              value: "s3://my-bucket/harbour-detector/output"
+
+            # Optional: supply an existing harbour DB to preserve stable IDs.
+            # - name: EXISTING_DB
+            #   value: "s3://my-bucket/reference/existing_harbours.parquet"
+
+            # ── S3 credentials (from Secret) ───────────────────────────────
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: harbour-detector-s3
+                  key: access-key-id
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: harbour-detector-s3
+                  key: secret-access-key
+            - name: AWS_DEFAULT_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: harbour-detector-s3
+                  key: region
+
+            # Optional: uncomment for MinIO or other S3-compatible endpoints.
+            # - name: S3_ENDPOINT_URL
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: harbour-detector-s3
+            #       key: endpoint-url

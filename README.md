@@ -117,6 +117,25 @@ Adjust these if your Parquet files use different column names.
 | `h3_jaccard_threshold` | `0.3` | Minimum H3 cell overlap ratio to match an existing harbour |
 | `centroid_match_distance_meters` | `500` | Fallback: centroid distance threshold for a match |
 
+### `s3` — S3 / MinIO storage
+
+All three data path keys (`raw_glob`, `interim_dir`, `output_dir`) accept `s3://` URIs in addition to local paths. When any path is an S3 URI the pipeline automatically routes I/O through the `s3fs` library (reads) and DuckDB's built-in `httpfs` extension (Phase 1 raw scans).
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `access_key_id` | `""` | AWS access key ID. Overrides `AWS_ACCESS_KEY_ID` env var |
+| `secret_access_key` | `""` | AWS secret access key. Overrides `AWS_SECRET_ACCESS_KEY` env var |
+| `region` | `""` | AWS region (defaults to `us-east-1` when blank). Overrides `AWS_DEFAULT_REGION` |
+| `endpoint_url` | `""` | Custom S3-compatible endpoint, e.g. `http://localhost:9000` for MinIO. Overrides `S3_ENDPOINT_URL` |
+
+**Credential precedence** (highest wins):
+
+1. Values set in `config/settings.yaml` under `[s3]`
+2. Environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_DEFAULT_REGION`, `S3_ENDPOINT_URL`)
+3. `.env` file in the project root (loaded automatically if present; never overwrites already-set env vars)
+
+Leave all four YAML fields blank to rely entirely on environment variables or IAM instance roles.
+
 ### `gui` — Streamlit app
 
 | Key | Default | Description |
@@ -162,6 +181,122 @@ Each phase reads from `data/interim/` and writes its output there. Phase 5 addit
 
 ---
 
+## Using S3 (or MinIO) for storage
+
+Any combination of local and S3 paths is valid. You can read raw Parquet from S3 while keeping intermediate files local, or route the entire pipeline through S3.
+
+### Quick start — AWS S3
+
+**1. Set credentials** (choose one method):
+
+Option A — `.env` file (recommended for local development):
+```bash
+cp .env.example .env
+# Edit .env and fill in your credentials
+```
+
+Option B — environment variables:
+```bash
+export AWS_ACCESS_KEY_ID="AKIAIOSFODNN7EXAMPLE"
+export AWS_SECRET_ACCESS_KEY="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+export AWS_DEFAULT_REGION="eu-west-1"
+```
+
+Option C — `config/settings.yaml`:
+```yaml
+s3:
+  access_key_id:     "AKIAIOSFODNN7EXAMPLE"
+  secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+  region:            "eu-west-1"
+  endpoint_url:      ""
+```
+
+**2. Set S3 paths in `config/settings.yaml`:**
+```yaml
+data:
+  raw_glob:    "s3://my-bucket/ais/**/*.parquet"
+  interim_dir: "s3://my-bucket/harbour-detector/interim"
+  output_dir:  "s3://my-bucket/harbour-detector/output"
+```
+
+**3. Run the pipeline exactly as before:**
+```bash
+python run.py phase1
+python run.py phase2
+python run.py phase3
+python run.py phase4
+python run.py phase5
+```
+
+### Quick start — MinIO
+
+MinIO uses path-style URLs and requires a custom endpoint. The pipeline sets `s3_url_style=path` and disables SSL automatically when `endpoint_url` is an `http://` address.
+
+```yaml
+s3:
+  access_key_id:     "minioadmin"
+  secret_access_key: "minioadmin"
+  region:            "us-east-1"   # MinIO ignores this but it must be non-empty for some clients
+  endpoint_url:      "http://localhost:9000"
+
+data:
+  raw_glob:    "s3://my-bucket/ais/**/*.parquet"
+  interim_dir: "s3://my-bucket/harbour-detector/interim"
+  output_dir:  "s3://my-bucket/harbour-detector/output"
+```
+
+> MinIO with HTTPS: set `endpoint_url: "https://minio.internal:9000"` — SSL is enabled automatically when the scheme is `https://`.
+
+### Mixing local and S3 paths
+
+Each path is independently switchable. For example, read raw data from S3 but keep intermediate files local:
+
+```yaml
+data:
+  raw_glob:    "s3://my-bucket/ais/**/*.parquet"   # read from S3
+  interim_dir: "data/interim"                       # local
+  output_dir:  "data/output"                        # local
+```
+
+Or write only the final output to S3:
+```yaml
+data:
+  raw_glob:    "data/raw/**/*.parquet"              # local
+  interim_dir: "data/interim"                       # local
+  output_dir:  "s3://my-bucket/harbour-detector/output"   # write results to S3
+```
+
+### Existing harbour database on S3
+
+The `--existing-db` flag also accepts `s3://` URIs:
+```bash
+python run.py phase5 --existing-db s3://my-bucket/reference/existing_harbours.parquet
+```
+
+### IAM instance roles (no explicit credentials)
+
+Leave all four `[s3]` YAML fields blank and do not set the corresponding environment variables. The underlying AWS SDK will pick up credentials from the EC2/ECS instance role, EKS service account, or `~/.aws/credentials` automatically.
+
+```yaml
+s3:
+  access_key_id:     ""
+  secret_access_key: ""
+  region:            ""
+  endpoint_url:      ""
+```
+
+### Troubleshooting S3 connections
+
+| Symptom | Likely cause | Fix |
+|---------|--------------|-----|
+| `NoCredentialsError` | No credentials found anywhere | Set `access_key_id` / `secret_access_key` in YAML or env vars |
+| `EndpointResolutionError` / connection refused | Wrong endpoint or MinIO not running | Check `endpoint_url` — must not have a trailing slash |
+| `403 Forbidden` | Bucket policy or wrong credentials | Verify key/secret and that the bucket allows the operation |
+| `NoSuchKey` when reading interim files | Previous phase not run yet | Run phases in order (phase1 → phase2 → … → phase5) |
+| DuckDB `IO Error: Unable to connect` | httpfs extension not installed | Run `pip install duckdb --upgrade`; ensure outbound HTTPS is allowed |
+
+---
+
 ## Running the GUI
 
 ```bash
@@ -186,6 +321,127 @@ python scripts/generate_dummy_harbours.py
 ```
 
 This writes `data/output/harbours.geojson` so the GUI has something to display immediately.
+
+---
+
+## Building the Docker image
+
+The `Dockerfile` in the project root packages the full pipeline into a self-contained image. The `reverse_geocoder` GeoNames dataset is pre-warmed during the build so the container never needs outbound internet access at runtime.
+
+### Build
+
+```bash
+docker build -t myregistry.io/harbour-detector:1.0.0 .
+```
+
+### Push
+
+```bash
+docker push myregistry.io/harbour-detector:1.0.0
+```
+
+Replace `myregistry.io/harbour-detector:1.0.0` with your actual registry and tag.
+
+### Local smoke test
+
+Verify the image works before deploying to the cluster:
+
+```bash
+docker run --rm \
+  -e RAW_GLOB="s3://my-bucket/ais/**/*.parquet" \
+  -e INTERIM_DIR="s3://my-bucket/harbour-detector/interim" \
+  -e OUTPUT_DIR="s3://my-bucket/harbour-detector/output" \
+  -e AWS_ACCESS_KEY_ID="AKIAIOSFODNN7EXAMPLE" \
+  -e AWS_SECRET_ACCESS_KEY="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" \
+  -e AWS_DEFAULT_REGION="eu-west-1" \
+  myregistry.io/harbour-detector:1.0.0
+```
+
+For MinIO add `-e S3_ENDPOINT_URL="http://host.docker.internal:9000"`.
+
+---
+
+## Deploying as a Kubernetes Job
+
+The manifests in `deploy/` run the full five-phase pipeline as a single Kubernetes Job in the `ais` namespace. Each phase writes its intermediate output to S3, so a failed pod can be retried without re-running earlier phases.
+
+### 1. Create the namespace (once)
+
+```bash
+kubectl create namespace ais
+```
+
+### 2. Create the S3 credentials secret
+
+Edit `deploy/secret.yaml` and fill in your real credentials:
+
+```yaml
+stringData:
+  access-key-id:     "AKIAIOSFODNN7EXAMPLE"
+  secret-access-key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+  region:            "eu-west-1"
+```
+
+Then apply it:
+
+```bash
+kubectl apply -f deploy/secret.yaml
+```
+
+> **Never commit `secret.yaml` with real credentials.** Use a secrets manager (Vault, Sealed Secrets, AWS Secrets Manager) to generate it at deploy time.
+
+For MinIO, add an `endpoint-url` key to the Secret and uncomment the `S3_ENDPOINT_URL` block in `deploy/job.yaml`.
+
+### 3. Configure data paths
+
+Open `deploy/job.yaml` and set the three environment variables to point at your data:
+
+```yaml
+- name: RAW_GLOB
+  value: "s3://my-bucket/ais/**/*.parquet"
+- name: INTERIM_DIR
+  value: "s3://my-bucket/harbour-detector/interim"
+- name: OUTPUT_DIR
+  value: "s3://my-bucket/harbour-detector/output"
+```
+
+### 4. Submit the Job
+
+```bash
+kubectl apply -f deploy/job.yaml
+```
+
+### 5. Follow progress
+
+```bash
+kubectl logs -f job/harbour-detector -n ais
+```
+
+### 6. Clean up after completion
+
+```bash
+kubectl delete job harbour-detector -n ais
+```
+
+### Environment variable overrides
+
+The container entry point (`run_pipeline.py`) loads `config/settings.yaml` baked into the image and applies the following environment variable overrides at startup:
+
+| Variable | Config key | Description |
+|----------|-----------|-------------|
+| `RAW_GLOB` | `data.raw_glob` | Glob pattern for raw AIS Parquet files |
+| `INTERIM_DIR` | `data.interim_dir` | Directory for intermediate per-phase outputs |
+| `OUTPUT_DIR` | `data.output_dir` | Directory for the final GeoJSON and Parquet output |
+| `EXISTING_DB` | `phase5.existing_db_path` | Optional: existing harbour DB for stable ID preservation |
+
+S3 credentials are injected from the `harbour-detector-s3` Kubernetes Secret:
+
+| Environment variable | Secret key |
+|----------------------|------------|
+| `AWS_ACCESS_KEY_ID` | `access-key-id` |
+| `AWS_SECRET_ACCESS_KEY` | `secret-access-key` |
+| `AWS_DEFAULT_REGION` | `region` |
+| `S3_ENDPOINT_URL` _(MinIO only)_ | `endpoint-url` |
 
 ---
 
@@ -226,7 +482,10 @@ This writes `data/output/harbours.geojson` so the GUI has something to display i
 ```
 harbour-detector/
 ├── config/
-│   └── settings.yaml          # All configuration
+│   └── settings.yaml          # All configuration (baked into the Docker image)
+├── deploy/
+│   ├── job.yaml               # Kubernetes Job manifest
+│   └── secret.yaml            # Kubernetes Secret template for S3 credentials
 ├── pipeline/
 │   ├── extract_stops.py       # Phase 1: stop event extraction
 │   ├── h3_aggregation.py      # Phase 2: H3 cell aggregation
@@ -236,7 +495,8 @@ harbour-detector/
 ├── models/
 │   └── stop_event.py          # Pydantic model for stop events
 ├── utils/
-│   └── geo.py                 # Haversine distance, positional variance
+│   ├── geo.py                 # Haversine distance, positional variance
+│   └── s3.py                  # S3 credential loading, path helpers, DuckDB httpfs setup
 ├── tests/                     # Pytest unit tests for all phases
 ├── scripts/
 │   └── generate_dummy_harbours.py  # GUI test data generator
@@ -246,8 +506,12 @@ harbour-detector/
 │   ├── reference/             # Reference databases (not committed)
 │   └── output/                # Final GeoJSON and Parquet output (not committed)
 ├── app.py                     # Streamlit GUI
-├── run.py                     # CLI entry point
-└── requirements.txt
+├── run.py                     # CLI entry point (local)
+├── run_pipeline.py            # Docker / Kubernetes entry point
+├── Dockerfile
+├── .dockerignore
+├── requirements.txt
+└── .env.example               # Template for local S3 credentials
 ```
 
 ---

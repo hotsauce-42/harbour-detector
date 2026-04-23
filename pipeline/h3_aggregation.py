@@ -9,7 +9,7 @@ Output: data/interim/h3_counts.parquet
 """
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import h3
@@ -17,6 +17,15 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+
+from utils.s3 import (
+    build_s3_config,
+    ensure_dir,
+    get_s3_filesystem,
+    get_s3_storage_options,
+    is_s3_path,
+    path_join,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +59,7 @@ class Phase2Config:
     h3_resolution: int = 11
     min_unique_mmsi: int = 5
     draught_change_threshold_m: float = 0.3  # metres — minimum |delta| to count as a change
+    s3_cfg: dict = field(default_factory=dict)
 
     @classmethod
     def from_yaml(cls, cfg: dict) -> "Phase2Config":
@@ -59,6 +69,7 @@ class Phase2Config:
             h3_resolution=p2.get("h3_resolution", 11),
             min_unique_mmsi=p2.get("min_unique_mmsi", 5),
             draught_change_threshold_m=p2.get("draught_change_threshold_m", 0.3),
+            s3_cfg=build_s3_config(cfg.get("s3", {})),
         )
 
 
@@ -211,15 +222,20 @@ def _filter_cells(agg: pd.DataFrame, config: Phase2Config) -> pd.DataFrame:
 # Step 4: write output
 # ---------------------------------------------------------------------------
 
-def _write_h3_counts(agg: pd.DataFrame, config: Phase2Config) -> Path:
-    out_path = Path(config.interim_dir) / "h3_counts.parquet"
+def _write_h3_counts(agg: pd.DataFrame, config: Phase2Config) -> str:
+    out_path = path_join(config.interim_dir, "h3_counts.parquet")
     # Ensure new string column is properly typed even when all-null
     agg = agg.copy()
     agg["top_destination_locode"] = agg["top_destination_locode"].astype(object).where(
         agg["top_destination_locode"].notna(), other=None
     )
     table = pa.Table.from_pandas(agg, schema=H3_COUNTS_SCHEMA, safe=False)
-    pq.write_table(table, out_path, compression="snappy")
+    if is_s3_path(config.interim_dir):
+        fs = get_s3_filesystem(config.s3_cfg)
+        with fs.open(out_path, "wb") as fh:
+            pq.write_table(table, fh, compression="snappy")
+    else:
+        pq.write_table(table, out_path, compression="snappy")
     logger.info("Wrote %d H3 cells → %s", len(agg), out_path)
     return out_path
 
@@ -228,13 +244,16 @@ def _write_h3_counts(agg: pd.DataFrame, config: Phase2Config) -> Path:
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def run_phase2(config: Phase2Config) -> Path:
-    stops_path = Path(config.interim_dir) / "stops.parquet"
-    if not stops_path.exists():
+def run_phase2(config: Phase2Config) -> str:
+    stops_path = path_join(config.interim_dir, "stops.parquet")
+    if not is_s3_path(config.interim_dir) and not Path(stops_path).exists():
         raise FileNotFoundError(f"stops.parquet not found at {stops_path} — run phase1 first")
 
     logger.info("Phase 2: reading %s …", stops_path)
-    stops = pd.read_parquet(stops_path)
+    if is_s3_path(config.interim_dir):
+        stops = pd.read_parquet(stops_path, storage_options=get_s3_storage_options(config.s3_cfg))
+    else:
+        stops = pd.read_parquet(stops_path)
     logger.info("  loaded %d stop events", len(stops))
 
     stops  = _assign_h3_cells(stops, config.h3_resolution)

@@ -221,7 +221,7 @@ def test_geojson_structure(tmp_path):
     df["harbour_id"]       = "test-harbour-id"
     df["matched_existing"] = False
 
-    out = _write_geojson(df, tmp_path)
+    out = _write_geojson(df, str(tmp_path), {})
     with open(out) as f:
         fc = json.load(f)
 

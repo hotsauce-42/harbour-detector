@@ -13,3 +13,6 @@ geopandas>=0.14.0
 shapely>=2.0.0
 reverse_geocoder>=1.5.1
 pycountry>=22.0
+# S3 support
+s3fs>=2023.6.0
+python-dotenv>=1.0.0

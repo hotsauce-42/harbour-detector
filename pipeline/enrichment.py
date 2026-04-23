@@ -13,7 +13,7 @@ Output: data/interim/harbours_enriched.parquet
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import h3
@@ -26,6 +26,13 @@ from shapely.geometry import mapping, shape
 from shapely.wkt import dumps as to_wkt
 
 from utils.geo import haversine_meters
+from utils.s3 import (
+    build_s3_config,
+    get_s3_filesystem,
+    get_s3_storage_options,
+    is_s3_path,
+    path_join,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,12 +65,14 @@ ENRICHED_SCHEMA = pa.schema([
 class Phase4Config:
     interim_dir: str
     city_min_population: int = 1000     # not enforced by reverse_geocoder; kept for docs
+    s3_cfg: dict = field(default_factory=dict)
 
     @classmethod
     def from_yaml(cls, cfg: dict) -> "Phase4Config":
         return cls(
             interim_dir=cfg.get("data", {}).get("interim_dir", "data/interim"),
             city_min_population=cfg.get("phase4", {}).get("city_min_population", 1000),
+            s3_cfg=build_s3_config(cfg.get("s3", {})),
         )
 
 
@@ -159,8 +168,8 @@ def _add_geocoding(clusters: pd.DataFrame) -> pd.DataFrame:
 # Step 4: write output
 # ---------------------------------------------------------------------------
 
-def _write_enriched(df: pd.DataFrame, config: Phase4Config) -> Path:
-    out_path = Path(config.interim_dir) / "harbours_enriched.parquet"
+def _write_enriched(df: pd.DataFrame, config: Phase4Config) -> str:
+    out_path = path_join(config.interim_dir, "harbours_enriched.parquet")
 
     h3_cells_array = pa.array(df["h3_cells"].tolist(), type=pa.list_(pa.string()))
 
@@ -190,7 +199,12 @@ def _write_enriched(df: pd.DataFrame, config: Phase4Config) -> Path:
         },
         schema=ENRICHED_SCHEMA,
     )
-    pq.write_table(table, out_path, compression="snappy")
+    if is_s3_path(config.interim_dir):
+        fs = get_s3_filesystem(config.s3_cfg)
+        with fs.open(out_path, "wb") as fh:
+            pq.write_table(table, fh, compression="snappy")
+    else:
+        pq.write_table(table, out_path, compression="snappy")
     logger.info("Wrote %d enriched harbours → %s", len(df), out_path)
     return out_path
 
@@ -199,15 +213,18 @@ def _write_enriched(df: pd.DataFrame, config: Phase4Config) -> Path:
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def run_phase4(config: Phase4Config) -> Path:
-    clusters_path = Path(config.interim_dir) / "harbour_clusters.parquet"
-    if not clusters_path.exists():
+def run_phase4(config: Phase4Config) -> str:
+    clusters_path = path_join(config.interim_dir, "harbour_clusters.parquet")
+    if not is_s3_path(config.interim_dir) and not Path(clusters_path).exists():
         raise FileNotFoundError(
             f"harbour_clusters.parquet not found at {clusters_path} — run phase3 first"
         )
 
     logger.info("Phase 4: reading %s …", clusters_path)
-    clusters = pd.read_parquet(clusters_path)
+    if is_s3_path(config.interim_dir):
+        clusters = pd.read_parquet(clusters_path, storage_options=get_s3_storage_options(config.s3_cfg))
+    else:
+        clusters = pd.read_parquet(clusters_path)
     logger.info("  loaded %d clusters", len(clusters))
 
     clusters = _add_polygons(clusters)

@@ -11,7 +11,7 @@ Output: data/interim/harbour_clusters.parquet
 
 import logging
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import h3
@@ -19,6 +19,14 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+
+from utils.s3 import (
+    build_s3_config,
+    get_s3_filesystem,
+    get_s3_storage_options,
+    is_s3_path,
+    path_join,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +56,7 @@ class Phase3Config:
     interim_dir: str
     min_cells_per_cluster: int = 1       # keep even single-cell harbours by default
     min_events_per_cluster: int = 5      # drop statistical noise with very few visits
+    s3_cfg: dict = field(default_factory=dict)
 
     @classmethod
     def from_yaml(cls, cfg: dict) -> "Phase3Config":
@@ -56,6 +65,7 @@ class Phase3Config:
             interim_dir=cfg.get("data", {}).get("interim_dir", "data/interim"),
             min_cells_per_cluster=p3.get("min_cells_per_cluster", 1),
             min_events_per_cluster=p3.get("min_events_per_cluster", 5),
+            s3_cfg=build_s3_config(cfg.get("s3", {})),
         )
 
 
@@ -174,8 +184,8 @@ def _filter_clusters(df: pd.DataFrame, config: Phase3Config) -> pd.DataFrame:
 # Step 5: write output
 # ---------------------------------------------------------------------------
 
-def _write_clusters(df: pd.DataFrame, config: Phase3Config) -> Path:
-    out_path = Path(config.interim_dir) / "harbour_clusters.parquet"
+def _write_clusters(df: pd.DataFrame, config: Phase3Config) -> str:
+    out_path = path_join(config.interim_dir, "harbour_clusters.parquet")
 
     # PyArrow requires explicit list type for the h3_cells column
     h3_cells_array = pa.array(df["h3_cells"].tolist(), type=pa.list_(pa.string()))
@@ -197,7 +207,12 @@ def _write_clusters(df: pd.DataFrame, config: Phase3Config) -> Path:
         },
         schema=CLUSTER_SCHEMA,
     )
-    pq.write_table(table, out_path, compression="snappy")
+    if is_s3_path(config.interim_dir):
+        fs = get_s3_filesystem(config.s3_cfg)
+        with fs.open(out_path, "wb") as fh:
+            pq.write_table(table, fh, compression="snappy")
+    else:
+        pq.write_table(table, out_path, compression="snappy")
     logger.info("Wrote %d harbour clusters → %s", len(df), out_path)
     return out_path
 
@@ -206,13 +221,16 @@ def _write_clusters(df: pd.DataFrame, config: Phase3Config) -> Path:
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def run_phase3(config: Phase3Config) -> Path:
-    counts_path = Path(config.interim_dir) / "h3_counts.parquet"
-    if not counts_path.exists():
+def run_phase3(config: Phase3Config) -> str:
+    counts_path = path_join(config.interim_dir, "h3_counts.parquet")
+    if not is_s3_path(config.interim_dir) and not Path(counts_path).exists():
         raise FileNotFoundError(f"h3_counts.parquet not found at {counts_path} — run phase2 first")
 
     logger.info("Phase 3: reading %s …", counts_path)
-    cell_df = pd.read_parquet(counts_path)
+    if is_s3_path(config.interim_dir):
+        cell_df = pd.read_parquet(counts_path, storage_options=get_s3_storage_options(config.s3_cfg))
+    else:
+        cell_df = pd.read_parquet(counts_path)
     logger.info("  loaded %d hot H3 cells", len(cell_df))
 
     hot_cells = set(cell_df["h3_cell"])

@@ -1,0 +1,42 @@
+# Version control
+.git/
+.gitignore
+
+# Data directories — never bake raw data or pipeline outputs into the image
+data/
+
+# Virtual environments
+.venv/
+venv/
+venv-*/
+env/
+
+# Tests and dev tooling
+tests/
+scripts/
+.pytest_cache/
+pytest.ini
+conftest.py
+
+# Streamlit GUI (not needed in the pipeline image)
+app.py
+.streamlit/
+
+# Secrets
+.env
+.env.local
+
+# Deploy manifests (not needed inside the image)
+deploy/
+
+# OS / IDE noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
