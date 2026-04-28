@@ -44,6 +44,9 @@ phase2:
 phase3:
   # connected component thresholds (tuned in later phase)
   min_cells_per_harbour: 1
+  # How many H3 rings to look outward when connecting hot cells.
+  # 1 = touching only; 3 bridges small cold-cell gaps within a harbour complex.
+  cluster_ring_size: 3
 
 phase4:
   city_min_population: 1000        # minimum population for "nearest city" lookup
@@ -52,6 +55,11 @@ phase5:
   # ID matching thresholds
   h3_jaccard_threshold: 0.3        # minimum H3 cell overlap to match existing harbour
   centroid_match_distance_meters: 500
+
+spark:
+  app_name: "harbour-detector"
+  # All other Spark/executor settings live in deploy/spark_job.yaml (sparkConf,
+  # driver/executor resources). Only app_name is needed here.
 
 s3:
   # Leave blank to use environment variables or IAM instance roles.

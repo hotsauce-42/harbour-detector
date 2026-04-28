@@ -39,8 +39,9 @@ def build_s3_config(yaml_s3: dict | None = None) -> dict:
     yaml_s3 = yaml_s3 or {}
 
     def _pick(yaml_key: str, env_key: str) -> str:
-        v = yaml_s3.get(yaml_key) or ""
-        return str(v).strip() if str(v).strip() else (os.environ.get(env_key) or "").strip()
+        env_val  = (os.environ.get(env_key) or "").strip()
+        yaml_val = str(yaml_s3.get(yaml_key) or "").strip()
+        return env_val if env_val else yaml_val
 
     return {
         "key":          _pick("access_key_id",    "AWS_ACCESS_KEY_ID"),

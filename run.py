@@ -10,9 +10,6 @@ Usage:
 import argparse
 import logging
 import sys
-from pathlib import Path
-
-import yaml
 
 
 def _setup_logging(verbose: bool) -> None:
@@ -25,19 +22,22 @@ def _setup_logging(verbose: bool) -> None:
     )
 
 
-def _load_config(config_path: str) -> dict:
-    with open(config_path) as f:
-        return yaml.safe_load(f)
-
-
 def cmd_phase1(args, cfg: dict) -> None:
-    from pipeline.extract_stops import Phase1Config, run_phase1
+    from pipeline.extract_stops        import Phase1Config
+    from pipeline.extract_stops_spark  import run_phase1
+    from utils.s3    import build_s3_config
+    from utils.spark import create_spark_session
 
     config = Phase1Config.from_yaml(cfg)
     if args.raw_glob:
         config.raw_glob = args.raw_glob
 
-    out = run_phase1(config)
+    s3_cfg = build_s3_config(cfg.get("s3", {}))
+    spark  = create_spark_session(s3_cfg, app_name=cfg.get("spark", {}).get("app_name", "harbour-detector"))
+    try:
+        out = run_phase1(config, spark)
+    finally:
+        spark.stop()
     print(f"\nPhase 1 complete. Output: {out}")
 
 
@@ -103,7 +103,8 @@ def main() -> None:
     args = parser.parse_args()
     _setup_logging(args.verbose)
 
-    cfg = _load_config(args.config)
+    from utils.config import load_config
+    cfg = load_config(args.config)
 
     if args.command == "phase1":
         cmd_phase1(args, cfg)

@@ -56,6 +56,7 @@ class Phase3Config:
     interim_dir: str
     min_cells_per_cluster: int = 1       # keep even single-cell harbours by default
     min_events_per_cluster: int = 5      # drop statistical noise with very few visits
+    cluster_ring_size: int = 3           # H3 rings to search for neighbours; >1 bridges gaps between hot cells
     s3_cfg: dict = field(default_factory=dict)
 
     @classmethod
@@ -65,6 +66,7 @@ class Phase3Config:
             interim_dir=cfg.get("data", {}).get("interim_dir", "data/interim"),
             min_cells_per_cluster=p3.get("min_cells_per_cluster", 1),
             min_events_per_cluster=p3.get("min_events_per_cluster", 5),
+            cluster_ring_size=p3.get("cluster_ring_size", 3),
             s3_cfg=build_s3_config(cfg.get("s3", {})),
         )
 
@@ -73,15 +75,16 @@ class Phase3Config:
 # Step 1: build adjacency graph
 # ---------------------------------------------------------------------------
 
-def _build_adjacency(hot_cells: set[str]) -> dict[str, set[str]]:
+def _build_adjacency(hot_cells: set[str], ring_size: int = 1) -> dict[str, set[str]]:
     """
-    For every hot cell, find which of its 6 H3 neighbours are also hot.
-    Returns an adjacency dict: cell → set of neighbouring hot cells.
+    For every hot cell, find which other hot cells lie within ring_size H3
+    rings. ring_size=1 connects only touching cells; larger values bridge
+    gaps of cold cells, merging fragmented harbour complexes.
+    Returns an adjacency dict: cell → set of reachable hot cells.
     """
     graph: dict[str, set[str]] = {cell: set() for cell in hot_cells}
     for cell in hot_cells:
-        # grid_disk(cell, 1) returns the cell itself + its 6 neighbours
-        for neighbour in h3.grid_disk(cell, 1):
+        for neighbour in h3.grid_disk(cell, ring_size):
             if neighbour != cell and neighbour in hot_cells:
                 graph[cell].add(neighbour)
     return graph
@@ -235,8 +238,8 @@ def run_phase3(config: Phase3Config) -> str:
 
     hot_cells = set(cell_df["h3_cell"])
 
-    logger.info("Building adjacency graph …")
-    graph = _build_adjacency(hot_cells)
+    logger.info("Building adjacency graph (ring_size=%d) …", config.cluster_ring_size)
+    graph = _build_adjacency(hot_cells, config.cluster_ring_size)
 
     logger.info("Finding connected components …")
     components = _connected_components(graph)

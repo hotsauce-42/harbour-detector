@@ -35,22 +35,22 @@ logger = logging.getLogger(__name__)
 
 # Output schema for stops.parquet
 STOP_SCHEMA = pa.schema([
-    pa.field("mmsi",                 pa.int64()),
-    pa.field("lat",                  pa.float64()),
-    pa.field("lon",                  pa.float64()),
-    pa.field("timestamp_start",      pa.timestamp("ms", tz="UTC")),
-    pa.field("timestamp_end",        pa.timestamp("ms", tz="UTC")),
-    pa.field("duration_minutes",     pa.float32()),
-    pa.field("n_messages",           pa.int32()),
-    pa.field("pos_variance_meters",  pa.float32()),
-    pa.field("nav_status",           pa.int16()),
-    pa.field("draught_arrival",      pa.float32()),
-    pa.field("draught_departure",    pa.float32()),
-    pa.field("draught_delta",        pa.float32()),
-    pa.field("detection_method",     pa.string()),
-    pa.field("ship_type",            pa.int16()),
-    pa.field("destination_raw",      pa.string()),
-    pa.field("destination_locode",   pa.string()),
+    pa.field("mmsi", pa.int64()),
+    pa.field("lat", pa.float64()),
+    pa.field("lon", pa.float64()),
+    pa.field("timestamp_start", pa.timestamp("ms", tz="UTC")),
+    pa.field("timestamp_end", pa.timestamp("ms", tz="UTC")),
+    pa.field("duration_minutes", pa.float32()),
+    pa.field("n_messages", pa.int32()),
+    pa.field("pos_variance_meters", pa.float32()),
+    pa.field("nav_status", pa.int16()),
+    pa.field("draught_arrival", pa.float32()),
+    pa.field("draught_departure", pa.float32()),
+    pa.field("draught_delta", pa.float32()),
+    pa.field("detection_method", pa.string()),
+    pa.field("ship_type", pa.int16()),
+    pa.field("destination_raw", pa.string()),
+    pa.field("destination_locode", pa.string()),
 ])
 
 
@@ -212,9 +212,9 @@ def _extract_type5_data(config: Phase1Config) -> pd.DataFrame:
 
     # Rename source columns to internal names
     rename = {
-        c.col_mmsi:      "mmsi",
+        c.col_mmsi: "mmsi",
         c.col_timestamp: "timestamp",
-        c.col_draught:   "draught",
+        c.col_draught: "draught",
     }
     df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
 
@@ -251,7 +251,7 @@ def _group_into_segments(vessel_df: pd.DataFrame, config: Phase1Config) -> list[
             continue
 
         t_start = seg["timestamp"].min()
-        t_end   = seg["timestamp"].max()
+        t_end = seg["timestamp"].max()
         duration = (t_end - t_start).total_seconds() / 60
 
         if duration < config.min_stop_duration_minutes:
@@ -268,15 +268,15 @@ def _group_into_segments(vessel_df: pd.DataFrame, config: Phase1Config) -> list[
         nav_mode = int(nav_vals.mode().iloc[0]) if len(nav_vals) > 0 else None
 
         segments.append({
-            "mmsi":               int(seg["mmsi"].iloc[0]),
-            "lat":                float(lats.mean()),
-            "lon":                float(lons.mean()),
-            "timestamp_start":    t_start,
-            "timestamp_end":      t_end,
-            "duration_minutes":   float(duration),
-            "n_messages":         int(len(seg)),
+            "mmsi": int(seg["mmsi"].iloc[0]),
+            "lat": float(lats.mean()),
+            "lon": float(lons.mean()),
+            "timestamp_start": t_start,
+            "timestamp_end": t_end,
+            "duration_minutes": float(duration),
+            "n_messages": int(len(seg)),
             "pos_variance_meters": float(variance),
-            "nav_status":         nav_mode,
+            "nav_status": nav_mode,
         })
 
     return segments
@@ -348,11 +348,11 @@ def _join_type5_data(stops: pd.DataFrame, type5: pd.DataFrame, config: Phase1Con
                         (ship type is a vessel characteristic, rarely changes)
     """
     if type5.empty:
-        stops["draught_arrival"]    = np.nan
-        stops["draught_departure"]  = np.nan
-        stops["draught_delta"]      = np.nan
-        stops["ship_type"]          = np.nan
-        stops["destination_raw"]    = None
+        stops["draught_arrival"] = np.nan
+        stops["draught_departure"] = np.nan
+        stops["draught_delta"] = np.nan
+        stops["ship_type"] = np.nan
+        stops["destination_raw"] = None
         stops["destination_locode"] = None
         return stops
 
@@ -369,17 +369,17 @@ def _join_type5_data(stops: pd.DataFrame, type5: pd.DataFrame, config: Phase1Con
     t5_by_mmsi = {int(mmsi): grp.reset_index(drop=True)
                   for mmsi, grp in type5.groupby("mmsi")}
 
-    arrivals      = []
-    departures    = []
-    dest_raws     = []
-    dest_locodes  = []
-    ship_types    = []
+    arrivals = []
+    departures = []
+    dest_raws = []
+    dest_locodes = []
+    ship_types = []
 
     for _, stop in stops.iterrows():
-        mmsi    = int(stop["mmsi"])
+        mmsi = int(stop["mmsi"])
         t_start = stop["timestamp_start"]
-        t_end   = stop["timestamp_end"]
-        t5      = t5_by_mmsi.get(mmsi)
+        t_end = stop["timestamp_end"]
+        t5 = t5_by_mmsi.get(mmsi)
 
         ship_types.append(ship_type_mode.get(mmsi))
 
@@ -396,17 +396,18 @@ def _join_type5_data(stops: pd.DataFrame, type5: pd.DataFrame, config: Phase1Con
 
         if not before.empty:
             last_before = before.iloc[-1]
-            arr = float(last_before["draught"]) if pd.notna(last_before["draught"]) and last_before["draught"] > 0 else np.nan
+            arr = float(last_before["draught"]) if pd.notna(last_before["draught"]) and last_before[
+                "draught"] > 0 else np.nan
             raw_dest = str(last_before["destination"]) if pd.notna(last_before.get("destination")) else None
         else:
-            arr      = np.nan
+            arr = np.nan
             raw_dest = None
 
         # First type-5 after t_end (within lookup window)
         after = t5[(t5["timestamp"] >= t_end) &
                    (t5["timestamp"] <= t_end + lookup_td)]
         dep = float(after.iloc[0]["draught"]) if (
-            not after.empty and pd.notna(after.iloc[0]["draught"]) and after.iloc[0]["draught"] > 0
+                not after.empty and pd.notna(after.iloc[0]["draught"]) and after.iloc[0]["draught"] > 0
         ) else np.nan
 
         arrivals.append(arr)
@@ -415,16 +416,16 @@ def _join_type5_data(stops: pd.DataFrame, type5: pd.DataFrame, config: Phase1Con
         dest_locodes.append(_parse_locode(raw_dest))
 
     stops = stops.copy()
-    stops["draught_arrival"]    = arrivals
-    stops["draught_departure"]  = departures
+    stops["draught_arrival"] = arrivals
+    stops["draught_departure"] = departures
     stops["draught_delta"] = (
-        stops["draught_departure"] - stops["draught_arrival"]
+            stops["draught_departure"] - stops["draught_arrival"]
     ).where(
-        pd.to_numeric(stops["draught_arrival"],   errors="coerce").notna() &
+        pd.to_numeric(stops["draught_arrival"], errors="coerce").notna() &
         pd.to_numeric(stops["draught_departure"], errors="coerce").notna()
     )
-    stops["ship_type"]          = ship_types
-    stops["destination_raw"]    = dest_raws
+    stops["ship_type"] = ship_types
+    stops["destination_raw"] = dest_raws
     stops["destination_locode"] = dest_locodes
 
     return stops
@@ -443,9 +444,9 @@ def _write_stops(stops: pd.DataFrame, config: Phase1Config) -> str:
     for col in ("draught_arrival", "draught_departure", "draught_delta",
                 "duration_minutes", "pos_variance_meters"):
         stops[col] = stops[col].astype("float32")
-    stops["n_messages"]  = stops["n_messages"].astype("int32")
-    stops["nav_status"]  = stops["nav_status"].astype("Int16")   # nullable int
-    stops["ship_type"]   = pd.to_numeric(stops.get("ship_type"), errors="coerce").astype("Int16")
+    stops["n_messages"] = stops["n_messages"].astype("int32")
+    stops["nav_status"] = stops["nav_status"].astype("Int16")  # nullable int
+    stops["ship_type"] = pd.to_numeric(stops.get("ship_type"), errors="coerce").astype("Int16")
 
     table = pa.Table.from_pandas(stops, schema=STOP_SCHEMA, safe=False)
     if is_s3_path(config.interim_dir):

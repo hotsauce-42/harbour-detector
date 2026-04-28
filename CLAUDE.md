@@ -20,6 +20,9 @@ python run.py phase5 --existing-db data/reference/existing_harbours.parquet
 # Tests (self-contained, no AIS files needed)
 pytest
 
+# Lint (line-length 88, E/F/W rules — config in ruff.toml)
+ruff check .
+
 # Streamlit GUI
 streamlit run app.py
 
@@ -46,7 +49,7 @@ S3 utilities centralised in `utils/s3.py`: credential resolution, DuckDB httpfs 
 
 - `pathlib.Path` collapses `s3://bucket` → `s3:/bucket`. Never use `Path()` for S3 paths. Use `utils.s3.path_join()` for all path joins that may touch S3 URIs.
 
-- Credential resolution order (highest wins): `config/settings.yaml` `[s3]` section → env vars (`AWS_ACCESS_KEY_ID` etc.) → `.env` file (loaded with `override=False`, never overwrites env).
+- Config resolution order (highest wins): env vars → `.env` file → `config/settings.yaml`. Any YAML key is overridable via `SECTION__KEY` env vars (e.g. `PHASE3__CLUSTER_RING_SIZE=5`, `S3__ENDPOINT_URL=http://minio:9000`). Legacy flat vars `RAW_GLOB`, `INTERIM_DIR`, `OUTPUT_DIR`, `EXISTING_DB` also still work. S3 credentials use the standard AWS env vars (`AWS_ACCESS_KEY_ID` etc.).
 
 - `libgdal-dev` must be installed at the OS level (`apt`) for geopandas/fiona — included in the Dockerfile, required on dev hosts too.
 

@@ -1,27 +1,22 @@
 """
 Docker / Kubernetes entrypoint.
 
-Loads config/settings.yaml (baked into the image), applies environment
-variable overrides, then runs all five pipeline phases sequentially.
+Loads config/settings.yaml (baked into the image), then applies overrides.
 
-Environment variable overrides
--------------------------------
-RAW_GLOB     → data.raw_glob          (e.g. s3://bucket/ais/**/*.parquet)
-INTERIM_DIR  → data.interim_dir       (e.g. s3://bucket/harbour-detector/interim)
-OUTPUT_DIR   → data.output_dir        (e.g. s3://bucket/harbour-detector/output)
-EXISTING_DB  → phase5.existing_db_path (optional, local or s3:// path)
+Priority (highest wins): env vars → .env file → settings.yaml
 
-S3 credentials (picked up automatically by utils/s3.py)
----------------------------------------------------------
-AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION, S3_ENDPOINT_URL
+Any YAML key can be overridden via SECTION__KEY env vars, e.g.:
+  DATA__RAW_GLOB, DATA__INTERIM_DIR, DATA__OUTPUT_DIR
+  PHASE1__SOG_THRESHOLD_KNOTS, PHASE3__CLUSTER_RING_SIZE, …
+  S3__ENDPOINT_URL
+
+Legacy flat vars also still work: RAW_GLOB, INTERIM_DIR, OUTPUT_DIR, EXISTING_DB
+S3 credentials: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION, S3_ENDPOINT_URL
 """
 
 import logging
-import os
 import sys
 from pathlib import Path
-
-import yaml
 
 logging.basicConfig(
     format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
@@ -33,39 +28,27 @@ logger = logging.getLogger("pipeline")
 
 _CONFIG_PATH = Path(__file__).parent / "config" / "settings.yaml"
 
-# Maps env var name → (yaml_section, yaml_key)
-_ENV_OVERRIDES: dict[str, tuple[str, str]] = {
-    "RAW_GLOB":    ("data",   "raw_glob"),
-    "INTERIM_DIR": ("data",   "interim_dir"),
-    "OUTPUT_DIR":  ("data",   "output_dir"),
-    "EXISTING_DB": ("phase5", "existing_db_path"),
-}
-
-
-def _load_config() -> dict:
-    with open(_CONFIG_PATH) as f:
-        cfg = yaml.safe_load(f)
-
-    for env_key, (section, key) in _ENV_OVERRIDES.items():
-        value = os.environ.get(env_key, "").strip()
-        if value:
-            cfg.setdefault(section, {})[key] = value
-            logger.info("Config override  %s.%s = %s", section, key, value)
-
-    return cfg
-
 
 def main() -> None:
-    from pipeline.extract_stops   import Phase1Config, run_phase1
-    from pipeline.h3_aggregation  import Phase2Config, run_phase2
-    from pipeline.cluster_formation import Phase3Config, run_phase3
-    from pipeline.enrichment       import Phase4Config, run_phase4
-    from pipeline.id_matching      import Phase5Config, run_phase5
+    from pipeline.extract_stops        import Phase1Config
+    from pipeline.extract_stops_spark  import run_phase1
+    from pipeline.h3_aggregation       import Phase2Config, run_phase2
+    from pipeline.cluster_formation    import Phase3Config, run_phase3
+    from pipeline.enrichment           import Phase4Config, run_phase4
+    from pipeline.id_matching          import Phase5Config, run_phase5
+    from utils.s3    import build_s3_config
+    from utils.spark import create_spark_session
 
-    cfg = _load_config()
+    from utils.config import load_config
+    cfg    = load_config(_CONFIG_PATH)
+    s3_cfg = build_s3_config(cfg.get("s3", {}))
 
-    logger.info("━━━ Phase 1: Stop extraction ━━━")
-    run_phase1(Phase1Config.from_yaml(cfg))
+    logger.info("━━━ Phase 1: Stop extraction (Spark) ━━━")
+    spark = create_spark_session(s3_cfg, app_name=cfg.get("spark", {}).get("app_name", "harbour-detector"))
+    try:
+        run_phase1(Phase1Config.from_yaml(cfg), spark)
+    finally:
+        spark.stop()
 
     logger.info("━━━ Phase 2: H3 aggregation ━━━")
     run_phase2(Phase2Config.from_yaml(cfg))

@@ -1,0 +1,128 @@
+# Kubernetes SparkApplication — harbour-detector full pipeline.
+#
+# Prerequisites:
+#   1. Spark Operator installed in the cluster.
+#   2. Service account with RBAC for executor pod management:
+#        kubectl create serviceaccount spark -n ais
+#        kubectl create clusterrolebinding spark-role \
+#          --clusterrole=edit --serviceaccount=ais:spark --namespace=ais
+#   3. S3 credentials secret:
+#        kubectl apply -f deploy/secret.yaml
+#
+# Deploy:
+#   kubectl apply -f deploy/spark_job.yaml
+#
+# Follow driver logs:
+#   kubectl logs -f $(kubectl get pod -n ais -l spark-role=driver -o name)
+#
+# Delete after completion:
+#   kubectl delete -f deploy/spark_job.yaml
+apiVersion: sparkoperator.k8s.io/v1beta2
+kind: SparkApplication
+metadata:
+  name: harbour-detector
+  namespace: ais
+  labels:
+    app: harbour-detector
+spec:
+  type: Python
+  pythonVersion: "3"
+  mode: cluster
+  image: myregistry.io/harbour-detector:1.0.0
+  imagePullPolicy: Always
+
+  # run_pipeline.py: Phase 1 via Spark, Phases 2-5 on the driver pod.
+  mainApplicationFile: "local:///app/run_pipeline.py"
+  sparkVersion: "4.0.0"
+
+  restartPolicy:
+    type: OnFailure
+    onFailureRetries: 2
+    onFailureRetryInterval: 10
+    onSubmissionFailureRetries: 3
+    onSubmissionFailureRetryInterval: 20
+
+  sparkConf:
+    # ── S3A / MinIO ─────────────────────────────────────────────────────────
+    "spark.hadoop.fs.s3a.impl":                       "org.apache.hadoop.fs.s3a.S3AFileSystem"
+    # CHANGE_ME: set to your MinIO / S3 endpoint, e.g.:
+    #   "http://minio.minio.svc.cluster.local:9000"   (MinIO in-cluster)
+    #   ""                                             (AWS S3, leave blank)
+    "spark.hadoop.fs.s3a.endpoint":                   "http://minio.minio.svc.cluster.local:9000"
+    "spark.hadoop.fs.s3a.path.style.access":          "true"
+    "spark.hadoop.fs.s3a.connection.ssl.enabled":     "false"
+    # Credentials are read from AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+    # env vars injected below — never put secrets in sparkConf (Spark UI shows them).
+    "spark.hadoop.fs.s3a.aws.credentials.provider":   "com.amazonaws.auth.EnvironmentVariableCredentialsProvider"
+    # ── Performance ──────────────────────────────────────────────────────────
+    "spark.sql.adaptive.enabled":                     "true"
+    "spark.sql.adaptive.coalescePartitions.enabled":  "true"
+    "spark.sql.shuffle.partitions":                   "400"
+    "spark.hadoop.mapreduce.fileoutputcommitter.algorithm.version": "2"
+
+  driver:
+    cores: 2
+    memory: "4g"
+    memoryOverhead: "1g"
+    serviceAccount: spark
+    labels:
+      app: harbour-detector
+    env:
+      # ── S3 data paths ──────────────────────────────────────────────────────
+      - name: RAW_GLOB
+        value: "s3://my-bucket/ais/**/*.parquet"   # CHANGE_ME
+      - name: INTERIM_DIR
+        value: "s3://my-bucket/harbour-detector/interim"   # CHANGE_ME
+      - name: OUTPUT_DIR
+        value: "s3://my-bucket/harbour-detector/output"    # CHANGE_ME
+      # Optional: existing harbour database for stable ID matching (Phase 5).
+      # - name: EXISTING_DB
+      #   value: "s3://my-bucket/reference/existing_harbours.parquet"
+      # ── S3 credentials (from Secret) ───────────────────────────────────────
+      - name: AWS_ACCESS_KEY_ID
+        valueFrom:
+          secretKeyRef:
+            name: harbour-detector-s3
+            key: access-key-id
+      - name: AWS_SECRET_ACCESS_KEY
+        valueFrom:
+          secretKeyRef:
+            name: harbour-detector-s3
+            key: secret-access-key
+      - name: AWS_DEFAULT_REGION
+        valueFrom:
+          secretKeyRef:
+            name: harbour-detector-s3
+            key: region
+      # Phases 2-5 (DuckDB/s3fs) also need the endpoint URL on the driver.
+      # Uncomment and add endpoint-url to deploy/secret.yaml for MinIO.
+      # - name: S3_ENDPOINT_URL
+      #   valueFrom:
+      #     secretKeyRef:
+      #       name: harbour-detector-s3
+      #       key: endpoint-url
+
+  executor:
+    cores: 4
+    instances: 4      # adjust to your cluster size
+    memory: "16g"
+    memoryOverhead: "2g"
+    labels:
+      app: harbour-detector
+    env:
+      # Executors need credentials for S3A reads/writes during Phase 1.
+      - name: AWS_ACCESS_KEY_ID
+        valueFrom:
+          secretKeyRef:
+            name: harbour-detector-s3
+            key: access-key-id
+      - name: AWS_SECRET_ACCESS_KEY
+        valueFrom:
+          secretKeyRef:
+            name: harbour-detector-s3
+            key: secret-access-key
+      - name: AWS_DEFAULT_REGION
+        valueFrom:
+          secretKeyRef:
+            name: harbour-detector-s3
+            key: region

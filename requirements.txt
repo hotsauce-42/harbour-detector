@@ -16,3 +16,5 @@ pycountry>=22.0
 # S3 support
 s3fs>=2023.6.0
 python-dotenv>=1.0.0
+# Spark (Phase 1)
+pyspark==4.0.0

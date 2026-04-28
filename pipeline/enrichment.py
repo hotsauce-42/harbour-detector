@@ -37,34 +37,34 @@ from utils.s3 import (
 logger = logging.getLogger(__name__)
 
 ENRICHED_SCHEMA = pa.schema([
-    pa.field("cluster_id",             pa.int32()),
-    pa.field("h3_cells",               pa.list_(pa.string())),
-    pa.field("n_cells",                pa.int32()),
-    pa.field("n_events",               pa.int32()),
-    pa.field("n_unique_mmsi_approx",   pa.int32()),
-    pa.field("n_draught_changes",      pa.int32()),
-    pa.field("centroid_lat",           pa.float64()),
-    pa.field("centroid_lon",           pa.float64()),
-    pa.field("centroid_h3_r8",         pa.string()),
-    pa.field("bbox_min_lat",           pa.float64()),
-    pa.field("bbox_max_lat",           pa.float64()),
-    pa.field("bbox_min_lon",           pa.float64()),
-    pa.field("bbox_max_lon",           pa.float64()),
-    pa.field("geometry_wkt",           pa.string()),     # WKT of H3-cell polygon
-    pa.field("country_iso2",           pa.string()),     # ISO 3166-1 alpha-2
-    pa.field("country_name",           pa.string()),
-    pa.field("nearest_city",           pa.string()),
-    pa.field("nearest_city_lat",       pa.float64()),
-    pa.field("nearest_city_lon",       pa.float64()),
-    pa.field("nearest_city_dist_km",   pa.float32()),
-    pa.field("admin1",                 pa.string()),     # state / province
+    pa.field("cluster_id", pa.int32()),
+    pa.field("h3_cells", pa.list_(pa.string())),
+    pa.field("n_cells", pa.int32()),
+    pa.field("n_events", pa.int32()),
+    pa.field("n_unique_mmsi_approx", pa.int32()),
+    pa.field("n_draught_changes", pa.int32()),
+    pa.field("centroid_lat", pa.float64()),
+    pa.field("centroid_lon", pa.float64()),
+    pa.field("centroid_h3_r8", pa.string()),
+    pa.field("bbox_min_lat", pa.float64()),
+    pa.field("bbox_max_lat", pa.float64()),
+    pa.field("bbox_min_lon", pa.float64()),
+    pa.field("bbox_max_lon", pa.float64()),
+    pa.field("geometry_wkt", pa.string()),  # WKT of H3-cell polygon
+    pa.field("country_iso2", pa.string()),  # ISO 3166-1 alpha-2
+    pa.field("country_name", pa.string()),
+    pa.field("nearest_city", pa.string()),
+    pa.field("nearest_city_lat", pa.float64()),
+    pa.field("nearest_city_lon", pa.float64()),
+    pa.field("nearest_city_dist_km", pa.float32()),
+    pa.field("admin1", pa.string()),  # state / province
 ])
 
 
 @dataclass
 class Phase4Config:
     interim_dir: str
-    city_min_population: int = 1000     # not enforced by reverse_geocoder; kept for docs
+    city_min_population: int = 1000  # not enforced by reverse_geocoder; kept for docs
     s3_cfg: dict = field(default_factory=dict)
 
     @classmethod
@@ -130,19 +130,19 @@ def _add_geocoding(clusters: pd.DataFrame) -> pd.DataFrame:
     # mode=2 → quiet batch mode
     results = rg.search(coords, mode=2)
 
-    country_iso2       = []
-    country_names      = []
-    nearest_cities     = []
-    city_lats          = []
-    city_lons          = []
-    city_dists_km      = []
-    admin1s            = []
+    country_iso2 = []
+    country_names = []
+    nearest_cities = []
+    city_lats = []
+    city_lons = []
+    city_dists_km = []
+    admin1s = []
 
     for (clat, clon), r in zip(coords, results):
         iso2 = r.get("cc", "")
         city_lat = float(r.get("lat", clat))
         city_lon = float(r.get("lon", clon))
-        dist_km  = haversine_meters(clat, clon, city_lat, city_lon) / 1000.0
+        dist_km = haversine_meters(clat, clon, city_lat, city_lon) / 1000.0
 
         country_iso2.append(iso2)
         country_names.append(_country_name(iso2))
@@ -153,13 +153,13 @@ def _add_geocoding(clusters: pd.DataFrame) -> pd.DataFrame:
         admin1s.append(r.get("admin1", ""))
 
     clusters = clusters.copy()
-    clusters["country_iso2"]         = country_iso2
-    clusters["country_name"]         = country_names
-    clusters["nearest_city"]         = nearest_cities
-    clusters["nearest_city_lat"]     = city_lats
-    clusters["nearest_city_lon"]     = city_lons
+    clusters["country_iso2"] = country_iso2
+    clusters["country_name"] = country_names
+    clusters["nearest_city"] = nearest_cities
+    clusters["nearest_city_lat"] = city_lats
+    clusters["nearest_city_lon"] = city_lons
     clusters["nearest_city_dist_km"] = city_dists_km
-    clusters["admin1"]               = admin1s
+    clusters["admin1"] = admin1s
 
     return clusters
 
@@ -175,27 +175,27 @@ def _write_enriched(df: pd.DataFrame, config: Phase4Config) -> str:
 
     table = pa.table(
         {
-            "cluster_id":           pa.array(df["cluster_id"],                    type=pa.int32()),
-            "h3_cells":             h3_cells_array,
-            "n_cells":              pa.array(df["n_cells"],                       type=pa.int32()),
-            "n_events":             pa.array(df["n_events"],                      type=pa.int32()),
-            "n_unique_mmsi_approx": pa.array(df["n_unique_mmsi_approx"],         type=pa.int32()),
-            "n_draught_changes":    pa.array(df["n_draught_changes"],             type=pa.int32()),
-            "centroid_lat":         pa.array(df["centroid_lat"],                  type=pa.float64()),
-            "centroid_lon":         pa.array(df["centroid_lon"],                  type=pa.float64()),
-            "centroid_h3_r8":       pa.array(df["centroid_h3_r8"],               type=pa.string()),
-            "bbox_min_lat":         pa.array(df["bbox_min_lat"],                  type=pa.float64()),
-            "bbox_max_lat":         pa.array(df["bbox_max_lat"],                  type=pa.float64()),
-            "bbox_min_lon":         pa.array(df["bbox_min_lon"],                  type=pa.float64()),
-            "bbox_max_lon":         pa.array(df["bbox_max_lon"],                  type=pa.float64()),
-            "geometry_wkt":         pa.array(df["geometry_wkt"],                  type=pa.string()),
-            "country_iso2":         pa.array(df["country_iso2"],                  type=pa.string()),
-            "country_name":         pa.array(df["country_name"],                  type=pa.string()),
-            "nearest_city":         pa.array(df["nearest_city"],                  type=pa.string()),
-            "nearest_city_lat":     pa.array(df["nearest_city_lat"],              type=pa.float64()),
-            "nearest_city_lon":     pa.array(df["nearest_city_lon"],              type=pa.float64()),
+            "cluster_id": pa.array(df["cluster_id"], type=pa.int32()),
+            "h3_cells": h3_cells_array,
+            "n_cells": pa.array(df["n_cells"], type=pa.int32()),
+            "n_events": pa.array(df["n_events"], type=pa.int32()),
+            "n_unique_mmsi_approx": pa.array(df["n_unique_mmsi_approx"], type=pa.int32()),
+            "n_draught_changes": pa.array(df["n_draught_changes"], type=pa.int32()),
+            "centroid_lat": pa.array(df["centroid_lat"], type=pa.float64()),
+            "centroid_lon": pa.array(df["centroid_lon"], type=pa.float64()),
+            "centroid_h3_r8": pa.array(df["centroid_h3_r8"], type=pa.string()),
+            "bbox_min_lat": pa.array(df["bbox_min_lat"], type=pa.float64()),
+            "bbox_max_lat": pa.array(df["bbox_max_lat"], type=pa.float64()),
+            "bbox_min_lon": pa.array(df["bbox_min_lon"], type=pa.float64()),
+            "bbox_max_lon": pa.array(df["bbox_max_lon"], type=pa.float64()),
+            "geometry_wkt": pa.array(df["geometry_wkt"], type=pa.string()),
+            "country_iso2": pa.array(df["country_iso2"], type=pa.string()),
+            "country_name": pa.array(df["country_name"], type=pa.string()),
+            "nearest_city": pa.array(df["nearest_city"], type=pa.string()),
+            "nearest_city_lat": pa.array(df["nearest_city_lat"], type=pa.float64()),
+            "nearest_city_lon": pa.array(df["nearest_city_lon"], type=pa.float64()),
             "nearest_city_dist_km": pa.array(df["nearest_city_dist_km"].astype("float32"), type=pa.float32()),
-            "admin1":               pa.array(df["admin1"],                        type=pa.string()),
+            "admin1": pa.array(df["admin1"], type=pa.string()),
         },
         schema=ENRICHED_SCHEMA,
     )
