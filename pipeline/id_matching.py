@@ -91,9 +91,17 @@ class Phase5Config:
 # Deterministic ID generation
 # ---------------------------------------------------------------------------
 
-def make_harbour_id(centroid_h3_r8: str) -> str:
-    """Stable UUID5 derived from the resolution-8 H3 cell of the centroid."""
-    return str(uuid.uuid5(_HARBOUR_NS, centroid_h3_r8))
+def make_harbour_id(centroid_h3_r8: str, country_iso2: str | None = None) -> str:
+    """
+    Deterministic harbour ID: '{CC}-{hex8}' where CC is the ISO 3166-1 alpha-2
+    country code and hex8 is the first 8 hex chars of the UUID5 of the centroid
+    H3 cell at resolution 8.  Falls back to 'ZZ' when country is unknown.
+
+    Examples: 'DE-b8d7e3a2', 'NL-4c2e1af3', 'ZZ-9a6d3c7f'
+    """
+    prefix = (country_iso2 or "").strip().upper() or "ZZ"
+    hex8   = uuid.uuid5(_HARBOUR_NS, centroid_h3_r8).hex[:8]
+    return f"{prefix}-{hex8}"
 
 
 # ---------------------------------------------------------------------------
@@ -283,7 +291,7 @@ def _assign_ids(
             matched_flags.append(True)
             n_matched += 1
         else:
-            harbour_ids.append(make_harbour_id(row["centroid_h3_r8"]))
+            harbour_ids.append(make_harbour_id(row["centroid_h3_r8"], row.get("country_iso2")))
             matched_flags.append(False)
             n_new += 1
 
