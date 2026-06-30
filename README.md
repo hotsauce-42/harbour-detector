@@ -402,7 +402,14 @@ For MinIO add `-e S3_ENDPOINT_URL="http://host.docker.internal:9000"`.
 
 ## Deploying on Kubernetes (Spark)
 
-Phase 1 runs on Spark. The recommended production deployment uses the **Spark Operator** (`deploy/spark_job.yaml`), which distributes Phase 1 across executor pods while the driver pod continues to run Phases 2–5 after Spark finishes. All intermediate data is written to S3 so failed pods can be retried without re-running earlier phases.
+Only Phase 1 uses Spark. The recommended production deployment **splits the pipeline into two steps** that hand off through S3:
+
+1. **Phase 1** runs on the **Spark Operator** (`deploy/spark_job.yaml`, entrypoint `run_phase1.py`), distributing stop extraction across executor pods.
+2. **Phases 2–5** run in a **plain pod** (`deploy/job_enrich.yaml`, entrypoint `run_enrich.py`) — pandas / geopandas / DuckDB only, no Spark, no executors, so the pod is small.
+
+The two steps share no state beyond the S3 paths (`INTERIM_DIR` / `OUTPUT_DIR`), so an external orchestrator just has to run them in order. All intermediate data is written to S3, so failed pods can be retried without re-running earlier phases.
+
+> Prefer a single pod? `deploy/job.yaml` (entrypoint `run_pipeline.py`) still runs all five phases in one container with Spark in `local[*]` mode — see [Deploying as a plain Kubernetes Job](#deploying-as-a-plain-kubernetes-job-small-datasets--testing).
 
 ### Prerequisites
 
@@ -442,7 +449,7 @@ kubectl apply -f deploy/secret.yaml
 
 ### 3. Configure `deploy/spark_job.yaml`
 
-Set the three `CHANGE_ME` env vars in the `driver` section and the MinIO endpoint in `sparkConf`:
+Set the `CHANGE_ME` env vars in the `driver` section and the MinIO endpoint in `sparkConf`. Phase 1 only reads `RAW_GLOB` and writes `INTERIM_DIR` — `OUTPUT_DIR` and `EXISTING_DB` belong to the enrichment step (`job_enrich.yaml`):
 
 ```yaml
 sparkConf:
@@ -454,11 +461,7 @@ driver:
       value: "s3://my-bucket/ais/**/*.parquet"
     - name: INTERIM_DIR
       value: "s3://my-bucket/harbour-detector/interim"
-    - name: OUTPUT_DIR
-      value: "s3://my-bucket/harbour-detector/output"
 ```
-
-Uncomment the `S3_ENDPOINT_URL` block in the driver env (needed by Phases 2–5 which use `s3fs`).
 
 Adjust executor sizing to your cluster:
 ```yaml
@@ -477,7 +480,7 @@ kubectl apply -f deploy/spark_job.yaml
 ### 5. Follow progress
 
 ```bash
-# Driver log (all phases, including non-Spark phases 2–5)
+# Driver log (Phase 1)
 kubectl logs -f \
   $(kubectl get pod -n ais -l spark-role=driver -o name) \
   -n ais
@@ -489,10 +492,26 @@ kubectl port-forward -n ais \
 # then open http://localhost:4040
 ```
 
-### 6. Clean up after completion
+### 6. Run the enrichment step (Phases 2–5)
+
+After Phase 1 completes, configure `deploy/job_enrich.yaml` (set `INTERIM_DIR` to the same value used above, plus `OUTPUT_DIR` and any optional `EXISTING_DB`) and apply it. Your orchestrator sequences the two steps; by hand:
+
+```bash
+# Wait for Phase 1 to finish
+kubectl wait -n ais \
+  --for=jsonpath='{.status.applicationState.state}'=COMPLETED \
+  sparkapplication/harbour-detector --timeout=24h
+
+# Run Phases 2–5 in a plain pod (no Spark)
+kubectl apply -f deploy/job_enrich.yaml
+kubectl logs -f job/harbour-detector-enrich -n ais
+```
+
+### 7. Clean up after completion
 
 ```bash
 kubectl delete sparkapplication harbour-detector -n ais
+kubectl delete -f deploy/job_enrich.yaml
 ```
 
 ### Environment variable overrides
@@ -598,8 +617,9 @@ harbour-detector/
 ├── config/
 │   └── settings.yaml              # All configuration (baked into the Docker image)
 ├── deploy/
-│   ├── spark_job.yaml             # SparkApplication for Spark Operator (recommended)
-│   ├── job.yaml                   # Plain Kubernetes Job (small datasets / testing)
+│   ├── spark_job.yaml             # SparkApplication for Spark Operator — Phase 1 (recommended)
+│   ├── job_enrich.yaml            # Plain Kubernetes Job — Phases 2-5 (pairs with spark_job.yaml)
+│   ├── job.yaml                   # Plain Kubernetes Job — all 5 phases (small datasets / testing)
 │   └── secret.yaml                # Kubernetes Secret template for S3 credentials
 ├── pipeline/
 │   ├── extract_stops.py           # Phase 1: per-vessel stop detection logic (reused by Spark UDF)
@@ -624,8 +644,10 @@ harbour-detector/
 │   ├── reference/                 # Reference databases (not committed)
 │   └── output/                    # Final GeoJSON and Parquet output (not committed)
 ├── app.py                         # Streamlit GUI
-├── run.py                         # CLI entry point (local)
-├── run_pipeline.py                # Docker / Kubernetes entry point
+├── run.py                         # CLI entry point (local, per-phase)
+├── run_pipeline.py                # Container entry point — all 5 phases (job.yaml)
+├── run_phase1.py                  # Container entry point — Phase 1 only (spark_job.yaml)
+├── run_enrich.py                  # Container entry point — Phases 2-5 (job_enrich.yaml)
 ├── Dockerfile
 ├── .dockerignore
 ├── requirements.txt

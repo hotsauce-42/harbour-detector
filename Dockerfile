@@ -44,5 +44,11 @@ COPY pipeline/      pipeline/
 COPY utils/         utils/
 COPY run.py         run.py
 COPY run_pipeline.py run_pipeline.py
+COPY run_phase1.py  run_phase1.py
+COPY run_enrich.py  run_enrich.py
 
+# Default entrypoint runs the full pipeline in one pod (deploy/job.yaml).
+# The split deployment overrides this:
+#   - Phase 1 (Spark)     : run_phase1.py  (deploy/spark_job.yaml)
+#   - Phases 2-5 (no Spark): run_enrich.py (deploy/job_enrich.yaml)
 ENTRYPOINT ["python", "run_pipeline.py"]

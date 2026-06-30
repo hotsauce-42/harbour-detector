@@ -1,4 +1,12 @@
-# Kubernetes SparkApplication — harbour-detector full pipeline.
+# Kubernetes SparkApplication — harbour-detector Phase 1 (stop extraction).
+#
+# This runs ONLY Phase 1 (the Spark phase). Phases 2-5 run separately in a
+# plain pod (deploy/job_enrich.yaml). Sequence them with your orchestrator:
+#   1. apply this SparkApplication
+#   2. wait for status.applicationState.state == COMPLETED
+#   3. apply deploy/job_enrich.yaml
+# All phases hand off through S3 (INTERIM_DIR / OUTPUT_DIR), so the two steps
+# share no state beyond those paths.
 #
 # Prerequisites:
 #   1. Spark Operator installed in the cluster.
@@ -14,6 +22,10 @@
 #
 # Follow driver logs:
 #   kubectl logs -f $(kubectl get pod -n ais -l spark-role=driver -o name)
+#
+# Wait for completion (orchestrator step before applying job_enrich.yaml):
+#   kubectl wait -n ais --for=jsonpath='{.status.applicationState.state}'=COMPLETED \
+#     sparkapplication/harbour-detector --timeout=24h
 #
 # Delete after completion:
 #   kubectl delete -f deploy/spark_job.yaml
@@ -31,8 +43,9 @@ spec:
   image: myregistry.io/harbour-detector:1.0.0
   imagePullPolicy: Always
 
-  # run_pipeline.py: Phase 1 via Spark, Phases 2-5 on the driver pod.
-  mainApplicationFile: "local:///app/run_pipeline.py"
+  # run_phase1.py: Phase 1 (stop extraction) only. Phases 2-5 run in a
+  # separate plain pod — see deploy/job_enrich.yaml.
+  mainApplicationFile: "local:///app/run_phase1.py"
   sparkVersion: "4.0.0"
 
   restartPolicy:
@@ -69,15 +82,12 @@ spec:
       app: harbour-detector
     env:
       # ── S3 data paths ──────────────────────────────────────────────────────
+      # Phase 1 reads RAW_GLOB and writes to INTERIM_DIR. OUTPUT_DIR and
+      # EXISTING_DB belong to Phase 5 — set those on deploy/job_enrich.yaml.
       - name: RAW_GLOB
         value: "s3://my-bucket/ais/**/*.parquet"   # CHANGE_ME
       - name: INTERIM_DIR
         value: "s3://my-bucket/harbour-detector/interim"   # CHANGE_ME
-      - name: OUTPUT_DIR
-        value: "s3://my-bucket/harbour-detector/output"    # CHANGE_ME
-      # Optional: existing harbour database for stable ID matching (Phase 5).
-      # - name: EXISTING_DB
-      #   value: "s3://my-bucket/reference/existing_harbours.parquet"
       # ── S3 credentials (from Secret) ───────────────────────────────────────
       - name: AWS_ACCESS_KEY_ID
         valueFrom:
@@ -94,13 +104,6 @@ spec:
           secretKeyRef:
             name: harbour-detector-s3
             key: region
-      # Phases 2-5 (DuckDB/s3fs) also need the endpoint URL on the driver.
-      # Uncomment and add endpoint-url to deploy/secret.yaml for MinIO.
-      # - name: S3_ENDPOINT_URL
-      #   valueFrom:
-      #     secretKeyRef:
-      #       name: harbour-detector-s3
-      #       key: endpoint-url
 
   executor:
     cores: 4
