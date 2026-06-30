@@ -1,0 +1,99 @@
+# Kubernetes Job — harbour-detector Phases 2-5 (enrichment, no Spark).
+#
+# Runs H3 aggregation, cluster formation, enrichment, and ID matching/export
+# in a single plain pod. No Spark Operator, executors, or JVM workload — these
+# phases are pandas / geopandas / DuckDB only, so the pod is small.
+#
+# Run this AFTER Phase 1 (deploy/spark_job.yaml) has completed. It reads the
+# Phase 1 output from INTERIM_DIR; if that output is missing the job fails fast
+# with a NoSuchKey error. Sequencing is the orchestrator's responsibility:
+#   kubectl apply -f deploy/spark_job.yaml
+#   kubectl wait -n ais --for=jsonpath='{.status.applicationState.state}'=COMPLETED \
+#     sparkapplication/harbour-detector --timeout=24h
+#   kubectl apply -f deploy/job_enrich.yaml
+#
+# Prerequisites:
+#   kubectl apply -f deploy/secret.yaml   # same S3 credential secret
+#
+# Deploy:
+#   kubectl apply -f deploy/job_enrich.yaml
+#
+# Follow logs:
+#   kubectl logs -f job/harbour-detector-enrich
+#
+# Delete after completion:
+#   kubectl delete -f deploy/job_enrich.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: harbour-detector-enrich
+  namespace: ais
+  labels:
+    app: harbour-detector
+spec:
+  # Each attempt creates a fresh pod. Intermediate S3 files from earlier
+  # phases are already written, so a retry skips completed phases' re-work.
+  backoffLimit: 2
+
+  # Hard deadline for the enrichment phases (6 hours). Far shorter than the
+  # Spark phase — adjust for very large datasets.
+  activeDeadlineSeconds: 21600
+
+  template:
+    metadata:
+      labels:
+        app: harbour-detector
+    spec:
+      restartPolicy: Never
+
+      containers:
+        - name: harbour-detector-enrich
+          image: myregistry.io/harbour-detector:1.0.0
+          imagePullPolicy: Always
+          # Override the image's default entrypoint (full pipeline) to run
+          # only the non-Spark phases.
+          command: ["python", "run_enrich.py"]
+          resources:
+            # No Spark/JVM here — a single pandas/geopandas process.
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+          env:
+            # ── S3 data paths ──────────────────────────────────────────────
+            # INTERIM_DIR must match the value used in deploy/spark_job.yaml.
+            - name: INTERIM_DIR
+              value: "s3://my-bucket/harbour-detector/interim"
+            - name: OUTPUT_DIR
+              value: "s3://my-bucket/harbour-detector/output"
+
+            # Optional: supply an existing harbour DB to preserve stable IDs.
+            # - name: EXISTING_DB
+            #   value: "s3://my-bucket/reference/existing_harbours.parquet"
+
+            # ── S3 credentials (from Secret) ───────────────────────────────
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: harbour-detector-s3
+                  key: access-key-id
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: harbour-detector-s3
+                  key: secret-access-key
+            - name: AWS_DEFAULT_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: harbour-detector-s3
+                  key: region
+
+            # Phases 2-5 use s3fs / DuckDB httpfs. For MinIO or other
+            # S3-compatible endpoints, supply the endpoint URL.
+            # - name: S3_ENDPOINT_URL
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: harbour-detector-s3
+            #       key: endpoint-url
