@@ -51,9 +51,20 @@ def _make_position_rows(
     return rows
 
 
+_EPOCH = pd.Timestamp("1970-01-01", tz="UTC")
+
+
 def _write_parquet(rows: list[dict], path: Path) -> None:
+    """
+    Write a raw-AIS fixture file. Timestamps are stored as integer Unix
+    seconds, matching the real raw data (see the Gotchas in CLAUDE.md).
+
+    The subtraction-and-divide keeps this independent of the datetime64
+    resolution pandas happens to parse into (ns on pandas 2, us on pandas 3).
+    """
     df = pd.DataFrame(rows)
-    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+    ts = pd.to_datetime(df["timestamp"], utc=True)
+    df["timestamp"] = ((ts - _EPOCH) // pd.Timedelta(1, "s")).astype("int64")
     pq.write_table(pa.Table.from_pandas(df), path)
 
 

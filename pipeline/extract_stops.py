@@ -123,6 +123,7 @@ def _bulk_extract(config: Phase1Config) -> pd.DataFrame:
     ships that are slow OR broadcasting moored/anchored status.
 
     Returns a DataFrame with columns normalised to internal names.
+    Raw timestamps are integer Unix seconds — see the Gotchas in CLAUDE.md.
     """
     c = config
     statuses = ", ".join(str(s) for s in c.moored_nav_statuses)
@@ -152,7 +153,7 @@ def _bulk_extract(config: Phase1Config) -> pd.DataFrame:
     df = con.execute(sql).df()
     con.close()
 
-    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s", utc=True)
     logger.info("  extracted %d candidate rows across %d unique vessels",
                 len(df), df["mmsi"].nunique())
     return df
@@ -224,7 +225,7 @@ def _extract_type5_data(config: Phase1Config) -> pd.DataFrame:
             df[dst] = df.pop(src) if src in df.columns else None
 
     df = df[["mmsi", "timestamp", "draught", "destination", "ship_type"]]
-    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s", utc=True)
     logger.info("  found %d type-5 records", len(df))
     return df.sort_values(["mmsi", "timestamp"]).reset_index(drop=True)
 

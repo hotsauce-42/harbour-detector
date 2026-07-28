@@ -67,6 +67,7 @@ phase5:
   # ID matching thresholds
   h3_jaccard_threshold: 0.3        # minimum H3 cell overlap to match existing harbour
   centroid_match_distance_meters: 500
+  existing_db_path: "data/existing_db/harbours.geojson"
 
 spark:
   app_name: "harbour-detector"
