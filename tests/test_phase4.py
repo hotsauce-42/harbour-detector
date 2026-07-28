@@ -101,11 +101,82 @@ def test_polygon_wkt_empty_cells_returns_none():
     assert result is None
 
 
+def _outline_config() -> Phase4Config:
+    return Phase4Config(interim_dir="")
+
+
 def test_add_polygons_column_added():
     df = _make_clusters_df([_cluster_row(0, HAMBURG_LAT, HAMBURG_LON)])
-    result = _add_polygons(df)
+    result = _add_polygons(df, _outline_config())
     assert "geometry_wkt" in result.columns
     assert result.iloc[0]["geometry_wkt"] is not None
+
+
+def test_add_polygons_outline_column_added():
+    df = _make_clusters_df([_cluster_row(0, HAMBURG_LAT, HAMBURG_LON)])
+    result = _add_polygons(df, _outline_config())
+    assert "outline_wkt" in result.columns
+    assert result.iloc[0]["outline_wkt"] is not None
+
+
+def test_outline_is_hole_free_and_grows():
+    """The outline encloses at least the cell union and carries no holes."""
+    df = _make_clusters_df([_cluster_row(0, HAMBURG_LAT, HAMBURG_LON)])
+    result = _add_polygons(df, _outline_config())
+
+    cells   = from_wkt(result.iloc[0]["geometry_wkt"])
+    outline = from_wkt(result.iloc[0]["outline_wkt"])
+
+    assert outline.area >= cells.area
+    polys = outline.geoms if outline.geom_type == "MultiPolygon" else [outline]
+    assert all(len(p.interiors) == 0 for p in polys)
+
+
+def test_outline_covers_every_cell():
+    """
+    Without vertex thinning the outline strictly contains the cell union —
+    no cell that saw traffic may fall outside the harbour it belongs to.
+    """
+    from pipeline.enrichment import _cells_to_geom
+    from utils.geo import outline_polygon
+
+    cells = sorted(h3.grid_disk(h3.latlng_to_cell(HAMBURG_LAT, HAMBURG_LON, RES), 1))
+    geom  = _cells_to_geom(cells)
+
+    outline = outline_polygon(geom, buffer_meters=75.0, simplify_meters=0)
+    # 1e-12° is ~0.1 µm — absorbs the float noise of the degrees→m→degrees
+    # round-trip, while staying far below any real geometric deviation.
+    assert outline.buffer(1e-12).covers(geom)
+
+
+def test_outline_bridges_gap_between_cell_groups():
+    """Two cell groups ~200 m apart close into a single polygon at 75 m."""
+    from pipeline.enrichment import _cells_to_geom
+    from utils.geo import outline_polygon
+
+    left  = h3.latlng_to_cell(HAMBURG_LAT, HAMBURG_LON, RES)
+    # ~200 m east, leaving a cold gap of roughly 50 m between the two groups.
+    right = h3.latlng_to_cell(HAMBURG_LAT, HAMBURG_LON + 0.0030, RES)
+    cells = sorted(set(h3.grid_disk(left, 1)) | set(h3.grid_disk(right, 1)))
+
+    geom = _cells_to_geom(cells)
+    assert geom.geom_type == "MultiPolygon"          # starts as two islands
+
+    outline = outline_polygon(geom, buffer_meters=75.0)
+    assert outline.geom_type == "Polygon"            # closed into one
+
+
+def test_outline_keeps_distant_groups_separate():
+    """Groups ~400 m apart stay separate — closing must not invent land."""
+    from pipeline.enrichment import _cells_to_geom
+    from utils.geo import outline_polygon
+
+    left  = h3.latlng_to_cell(HAMBURG_LAT, HAMBURG_LON, RES)
+    right = h3.latlng_to_cell(HAMBURG_LAT, HAMBURG_LON + 0.0060, RES)
+    cells = sorted(set(h3.grid_disk(left, 1)) | set(h3.grid_disk(right, 1)))
+
+    outline = outline_polygon(_cells_to_geom(cells), buffer_meters=75.0)
+    assert outline.geom_type == "MultiPolygon"
 
 
 def test_country_name_germany():

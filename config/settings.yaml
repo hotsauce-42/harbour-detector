@@ -63,6 +63,23 @@ phase3:
 phase4:
   city_min_population: 1000        # minimum population for "nearest city" lookup
 
+  # Harbour outline — the H3-cell union morphologically closed (dilated then
+  # eroded) so the gaps between berths close and the interior holes left by
+  # untrafficked cells disappear. Exported as harbours.geojson; the exact cell
+  # union is still written to harbours_cells.geojson.
+  # Closing fills gaps narrower than 2× the buffer without pushing the outer
+  # boundary beyond ~1 buffer past the outermost cell. At 75 m that bridges
+  # ~150 m — about three res-11 cells. Raise it to merge terminals that are
+  # further apart into one polygon, lower it to hug the cells more tightly.
+  outline_buffer_meters: 75
+  # Vertex thinning. Off by default: the outline is guaranteed to contain every
+  # cell that saw traffic, and simplify is the one step that can break that —
+  # it shaves the boundary inwards by up to its tolerance, and 10 m is already
+  # enough to cut a whole res-11 cell out. Raise it only to shrink the output
+  # (10 m is roughly 5× smaller), accepting that bite.
+  outline_simplify_meters: 0
+  outline_fill_holes: true         # drop interior rings
+
 phase5:
   # ID matching thresholds
   h3_jaccard_threshold: 0.3        # minimum H3 cell overlap to match existing harbour
@@ -93,6 +110,9 @@ s3:
 
 gui:
   output_file: "data/output/harbours.geojson"
+  # H3-cell companion file behind the map's "H3 cells" / "Both" toggle.
+  # Defaults to output_file with a '_cells' suffix when left unset.
+  cells_file: "data/output/harbours_cells.geojson"
   default_tile: "OpenStreetMap"
   map_tiles:
     - name: "OpenStreetMap"

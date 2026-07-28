@@ -2,9 +2,12 @@
 Harbour Detector — Streamlit GUI
 
 Layout:
-  Sidebar  — tile-server selector + search/filter
+  Sidebar  — tile-server selector + geometry toggle + search/filter
   Left col — sortable harbour table (click row to select)
   Right col — Folium map with the selected harbour's polygon + metadata
+
+The map can draw either the harbour outline (harbours.geojson), the H3 cells it
+was built from (harbours_cells.geojson), or both stacked.
 
 Run:
   ~/harbour-venv/bin/streamlit run app.py
@@ -41,6 +44,37 @@ def load_features(path: str) -> list[dict]:
     return fc.get("features", [])
 
 
+@st.cache_data(show_spinner=False)
+def load_geometry_by_id(path: str) -> dict[str, dict]:
+    """
+    Map harbour_id → geometry for a companion GeoJSON.
+
+    Keyed by ID rather than position so the two files stay in step even if one
+    of them was written by an older pipeline run.
+    """
+    if not path or not Path(path).exists():
+        return {}
+    with open(path, encoding="utf-8") as f:
+        fc = json.load(f)
+    return {
+        feat.get("properties", {}).get("harbour_id"): feat.get("geometry")
+        for feat in fc.get("features", [])
+        if feat.get("properties", {}).get("harbour_id") and feat.get("geometry")
+    }
+
+
+def _cells_path(output_file: str, gui_cfg: dict) -> str:
+    """
+    Locate the H3-cell companion file. Defaults to the outline file's name with
+    a '_cells' suffix, i.e. harbours.geojson → harbours_cells.geojson.
+    """
+    explicit = gui_cfg.get("cells_file")
+    if explicit:
+        return explicit
+    p = Path(output_file)
+    return str(p.with_name(f"{p.stem}_cells{p.suffix}"))
+
+
 def _build_display_df(features: list[dict]) -> pd.DataFrame:
     rows = []
     for i, feat in enumerate(features):
@@ -61,14 +95,34 @@ def _build_display_df(features: list[dict]) -> pd.DataFrame:
 # Map builder
 # ---------------------------------------------------------------------------
 
+OUTLINE_STYLE = {
+    "fillColor":   "#1E88E5",
+    "color":       "#0D47A1",
+    "weight":      2.5,
+    "fillOpacity": 0.30,
+}
+CELLS_STYLE = {
+    "fillColor":   "#FB8C00",
+    "color":       "#E65100",
+    "weight":      1,
+    "fillOpacity": 0.45,
+}
+
+SHOW_OUTLINE = "Outline"
+SHOW_CELLS   = "H3 cells"
+SHOW_BOTH    = "Both"
+
+
 def _build_map(
     feat: dict,
     tile_url: str,
     tile_attr: str,
     tile_name: str,
+    cells_geom: dict | None = None,
+    show: str = SHOW_OUTLINE,
 ) -> folium.Map:
-    props = feat.get("properties", {})
-    geom  = feat.get("geometry")
+    props        = feat.get("properties", {})
+    outline_geom = feat.get("geometry")
 
     clat = props.get("centroid_lat", 0.0)
     clon = props.get("centroid_lon", 0.0)
@@ -76,41 +130,70 @@ def _build_map(
     m = folium.Map(location=[clat, clon], zoom_start=13, tiles=None)
     folium.TileLayer(tiles=tile_url, attr=tile_attr, name=tile_name).add_to(m)
 
-    if geom:
-        city    = props.get("nearest_city", "Harbour")
-        hid     = props.get("harbour_id", "")[:8]
-        country = props.get("country_name", "")
-        vessels = props.get("n_unique_mmsi", props.get("n_unique_mmsi_approx", 0))
+    city    = props.get("nearest_city", "Harbour")
+    hid     = props.get("harbour_id", "")[:8]
+    country = props.get("country_name", "")
+    vessels = props.get("n_unique_mmsi", props.get("n_unique_mmsi_approx", 0))
 
-        popup_html = f"""
-        <b>{city}, {country}</b><br/>
-        ID: {hid}…<br/>
-        Events: {props.get('n_events', 0):,}<br/>
-        Vessels: {vessels:,}<br/>
-        H3 cells: {props.get('n_cells', 0)}<br/>
-        Draught changes: {props.get('n_draught_changes', 0)}
-        """
+    popup_html = f"""
+    <b>{city}, {country}</b><br/>
+    ID: {hid}…<br/>
+    Events: {props.get('n_events', 0):,}<br/>
+    Vessels: {vessels:,}<br/>
+    H3 cells: {props.get('n_cells', 0)}<br/>
+    Draught changes: {props.get('n_draught_changes', 0)}
+    """
 
+    # Outline first so the finer cells stay legible on top of it.
+    layers = []
+    if show in (SHOW_OUTLINE, SHOW_BOTH) and outline_geom:
+        layers.append((outline_geom, OUTLINE_STYLE, f"{city} — outline"))
+    if show in (SHOW_CELLS, SHOW_BOTH) and cells_geom:
+        layers.append((cells_geom, CELLS_STYLE, f"{city} — H3 cells"))
+
+    for geom, style, label in layers:
         folium.GeoJson(
             geom,
-            style_function=lambda _: {
-                "fillColor":   "#1E88E5",
-                "color":       "#0D47A1",
-                "weight":      2,
-                "fillOpacity": 0.35,
-            },
-            tooltip=folium.Tooltip(f"{city} ({hid}…)"),
+            style_function=lambda _, s=style: s,
+            tooltip=folium.Tooltip(f"{label} ({hid}…)"),
             popup=folium.Popup(popup_html, max_width=260),
         ).add_to(m)
 
-        # Fit view to polygon bounds
+    # Fit the view to everything drawn (the outline already covers the cells).
+    if layers:
         try:
-            bounds = shape(geom).bounds   # (minlon, minlat, maxlon, maxlat)
+            bounds = shape(layers[0][0]).bounds  # (minlon, minlat, maxlon, maxlat)
             m.fit_bounds([[bounds[1], bounds[0]], [bounds[3], bounds[2]]])
         except Exception:
             pass
 
     return m
+
+
+def _map_legend(show: str) -> None:
+    """Colour key matching the layers currently drawn."""
+    swatch = (
+        '<span style="display:inline-block;width:11px;height:11px;'
+        'background:{fill};border:1.5px solid {line};margin-right:5px;'
+        'vertical-align:middle;"></span>'
+    )
+    entries = []
+    if show in (SHOW_OUTLINE, SHOW_BOTH):
+        entries.append(
+            swatch.format(fill=OUTLINE_STYLE["fillColor"], line=OUTLINE_STYLE["color"])
+            + "Harbour outline"
+        )
+    if show in (SHOW_CELLS, SHOW_BOTH):
+        entries.append(
+            swatch.format(fill=CELLS_STYLE["fillColor"], line=CELLS_STYLE["color"])
+            + "H3 cells with stop events"
+        )
+    st.markdown(
+        '<div style="font-size:0.85em;opacity:0.85;">'
+        + "&nbsp;&nbsp;&nbsp;".join(entries)
+        + "</div>",
+        unsafe_allow_html=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +211,7 @@ def main() -> None:
     gui_cfg = cfg.get("gui", {})
 
     output_file = gui_cfg.get("output_file", "data/output/harbours.geojson")
+    cells_file  = _cells_path(output_file, gui_cfg)
     tile_layers = gui_cfg.get("map_tiles", [
         {
             "name":        "OpenStreetMap",
@@ -147,6 +231,25 @@ def main() -> None:
         default_idx = tile_names.index(default_tile) if default_tile in tile_names else 0
         selected_tile_name = st.selectbox("Map tiles", tile_names, index=default_idx)
         selected_tile = next(t for t in tile_layers if t["name"] == selected_tile_name)
+
+        st.divider()
+
+        # Geometry toggle — only offer the cell layers when the file is there.
+        cells_by_id = load_geometry_by_id(cells_file)
+        if cells_by_id:
+            show_geom = st.segmented_control(
+                "Show on map",
+                [SHOW_OUTLINE, SHOW_CELLS, SHOW_BOTH],
+                default=SHOW_OUTLINE,
+                help="Outline is the closed harbour boundary; H3 cells are the "
+                     "individual cells that had stop events.",
+            ) or SHOW_OUTLINE
+        else:
+            show_geom = SHOW_OUTLINE
+            st.caption(
+                f"Showing outlines only — `{Path(cells_file).name}` not found. "
+                "Re-run phase 5 to generate the H3-cell layer."
+            )
 
         st.divider()
         search = st.text_input("Search city / country", placeholder="e.g. Hamburg")
@@ -228,6 +331,8 @@ def main() -> None:
         tile_url=selected_tile["url"],
         tile_attr=selected_tile["attribution"],
         tile_name=selected_tile["name"],
+        cells_geom=cells_by_id.get(props.get("harbour_id")),
+        show=show_geom,
     )
     st_folium(
         fmap,
@@ -235,6 +340,8 @@ def main() -> None:
         height=500,
         returned_objects=[],
     )
+
+    _map_legend(show_geom)
 
     # ── Details expander ───────────────────────────────────────────────────
     with st.expander("Full properties"):

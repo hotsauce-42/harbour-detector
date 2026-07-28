@@ -1,4 +1,4 @@
-streamlit>=1.35.0
+streamlit>=1.40.0        # st.segmented_control (map geometry toggle)
 streamlit-folium>=0.20.0
 folium>=0.16.0
 duckdb>=0.10.0

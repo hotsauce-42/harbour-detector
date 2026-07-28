@@ -60,11 +60,12 @@ def main() -> None:
     run_phase4(Phase4Config.from_yaml(cfg))
 
     logger.info("━━━ Phase 5: ID matching + export ━━━")
-    parquet_path, geojson_path = run_phase5(Phase5Config.from_yaml(cfg))
+    parquet_path, geojson_path, cells_path = run_phase5(Phase5Config.from_yaml(cfg))
 
     logger.info("Pipeline complete.")
     logger.info("  Parquet : %s", parquet_path)
-    logger.info("  GeoJSON : %s", geojson_path)
+    logger.info("  Outline : %s", geojson_path)
+    logger.info("  Cells   : %s", cells_path)
 
 
 if __name__ == "__main__":

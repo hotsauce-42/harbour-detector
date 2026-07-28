@@ -72,10 +72,11 @@ def cmd_phase5(args, cfg: dict) -> None:
     if args.existing_db:
         config.existing_db_path = args.existing_db
 
-    parquet_path, geojson_path = run_phase5(config)
+    parquet_path, geojson_path, cells_path = run_phase5(config)
     print(f"\nPhase 5 complete.")
     print(f"  Parquet : {parquet_path}")
-    print(f"  GeoJSON : {geojson_path}")
+    print(f"  Outline : {geojson_path}")
+    print(f"  Cells   : {cells_path}")
 
 
 def main() -> None:

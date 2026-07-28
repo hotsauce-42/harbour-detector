@@ -118,6 +118,9 @@ Adjust these if your Parquet files use different column names.
 | Key | Default | Description |
 |-----|---------|-------------|
 | `city_min_population` | `1000` | Minimum city population for reverse geocoding lookup |
+| `outline_buffer_meters` | `75` | Closing radius for the harbour outline. Fills gaps narrower than 2× this (~150 m, three res-11 cells) without pushing the boundary more than ~1 buffer past the outermost cell. Raise it to merge terminals that are further apart into a single polygon. |
+| `outline_simplify_meters` | `0` | Vertex thinning tolerance for the outline. Off by default — it is the only step that can pull the boundary inside a trafficked cell (a 10 m tolerance already bites up to ~50 m, a whole res-11 cell). Raise it to shrink the output ~5× if that trade is acceptable. |
+| `outline_fill_holes` | `true` | Drop interior rings, so untrafficked cells inside a harbour leave no holes |
 
 ### `phase5` — ID matching
 
@@ -157,7 +160,8 @@ Leave all four YAML fields blank and set the standard AWS env vars instead. This
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `output_file` | `data/output/harbours.geojson` | GeoJSON file the GUI reads |
+| `output_file` | `data/output/harbours.geojson` | GeoJSON file the GUI reads — the harbour outlines |
+| `cells_file` | `data/output/harbours_cells.geojson` | H3-cell geometry behind the map's **H3 cells** / **Both** toggle. Defaults to `output_file` with a `_cells` suffix; if the file is absent the GUI shows outlines only. |
 | `default_tile` | `OpenStreetMap` | Which tile layer is selected on startup |
 | `map_tiles` | (4 built-in layers) | List of `{name, url, attribution}` tile server definitions |
 
@@ -580,15 +584,36 @@ kubectl delete job harbour-detector -n ais   # clean up
 
 ## Output format
 
-`data/output/harbours.geojson` is a GeoJSON `FeatureCollection`. Each feature represents one harbour.
+Phase 5 writes three files, all covering the same harbours with the same properties:
 
-**Geometry**: a Polygon or MultiPolygon derived from the union of all H3 cells in the cluster.
+| File | Geometry |
+|------|----------|
+| `data/output/harbours.geojson` | The **harbour outline** — one closed polygon per harbour |
+| `data/output/harbours_cells.geojson` | The exact union of the harbour's hot H3 cells |
+| `data/output/harbours.parquet` | Both, as the `outline_wkt` and `geometry_wkt` columns |
+
+GeoJSON allows only one geometry per feature, which is why the two shapes are split
+across two files; every feature carries a `geometry_kind` property (`outline` or
+`cells`) saying which one it holds.
+
+The outline is the cell union morphologically **closed** — dilated by
+`phase4.outline_buffer_meters` and eroded again — then stripped of interior rings.
+That fills the gaps between berths and the holes left by cells that saw no traffic,
+giving the shape of the harbour rather than the shape of the data. Closing never
+extends the boundary more than about one buffer past the outermost cell, so the
+outline does not cover water or land the vessels never visited. The outline always
+contains every cell that saw traffic. Terminals further apart than 2× the buffer
+stay separate, so an outline can still be a MultiPolygon — raise
+`outline_buffer_meters` to merge them; Phase 4 logs how many stayed multi-part.
+
+`data/output/harbours.geojson` is a GeoJSON `FeatureCollection`. Each feature represents one harbour.
 
 **Properties**:
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `harbour_id` | string (UUID) | Stable identifier; same harbour always gets the same ID |
+| `geometry_kind` | string | `outline` or `cells` — which geometry this file holds |
 | `h3_cells` | array of strings | All H3 cell addresses at resolution 11 |
 | `n_cells` | integer | Number of H3 cells |
 | `n_events` | integer | Total stop events recorded in this harbour |

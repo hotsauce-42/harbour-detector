@@ -7,7 +7,8 @@ For each enriched harbour cluster:
        b) Centroid distance        (fallback when existing DB has no h3_cells)
   2. Assign the matched harbour_id, or generate a new deterministic one
      (UUID5 of the centroid H3 cell at resolution 8 — stable across re-runs).
-  3. Write data/output/harbours.geojson and data/output/harbours.parquet.
+  3. Write data/output/harbours.parquet (both geometries), plus
+     harbours.geojson (harbour outline) and harbours_cells.geojson (H3 cells).
 
 Existing harbour database format (Parquet or GeoJSON):
   Required : harbour_id  (string)
@@ -59,7 +60,8 @@ OUTPUT_SCHEMA = pa.schema([
     pa.field("nearest_city",           pa.string()),
     pa.field("nearest_city_dist_km",   pa.float32()),
     pa.field("admin1",                 pa.string()),
-    pa.field("geometry_wkt",           pa.string()),
+    pa.field("geometry_wkt",           pa.string()),  # exact H3-cell union
+    pa.field("outline_wkt",            pa.string()),  # closed harbour outline
     pa.field("matched_existing",       pa.bool_()),  # True = reused existing harbour_id
 ])
 
@@ -331,6 +333,7 @@ def _write_parquet(df: pd.DataFrame, out_dir: str, s3_cfg: dict) -> str:
             "nearest_city_dist_km": pa.array(df["nearest_city_dist_km"].astype("float32"), type=pa.float32()),
             "admin1":               pa.array(df["admin1"],                        type=pa.string()),
             "geometry_wkt":         pa.array(df["geometry_wkt"],                  type=pa.string()),
+            "outline_wkt":          pa.array(df["outline_wkt"],                   type=pa.string()),
             "matched_existing":     pa.array(df["matched_existing"],              type=pa.bool_()),
         },
         schema=OUTPUT_SCHEMA,
@@ -345,16 +348,29 @@ def _write_parquet(df: pd.DataFrame, out_dir: str, s3_cfg: dict) -> str:
     return out_path
 
 
-def _write_geojson(df: pd.DataFrame, out_dir: str, s3_cfg: dict) -> str:
-    out_path = path_join(out_dir, "harbours.geojson")
+def _write_geojson(
+    df: pd.DataFrame,
+    out_dir: str,
+    s3_cfg: dict,
+    geometry_col: str = "outline_wkt",
+    filename: str = "harbours.geojson",
+) -> str:
+    """
+    Write one GeoJSON FeatureCollection using `geometry_col` as the feature
+    geometry. GeoJSON allows a single geometry per feature, so the outline and
+    the H3-cell union are written to separate files; the `geometry_kind`
+    property says which one a file holds.
+    """
+    out_path = path_join(out_dir, filename)
+    kind = "outline" if geometry_col == "outline_wkt" else "cells"
 
     features = []
     for _, row in df.iterrows():
         # Geometry
         geom = None
-        if pd.notna(row.get("geometry_wkt")):
+        if pd.notna(row.get(geometry_col)):
             try:
-                geom = mapping(from_wkt(row["geometry_wkt"]))
+                geom = mapping(from_wkt(row[geometry_col]))
             except Exception as exc:
                 logger.warning("Could not parse WKT for harbour %s: %s", row["harbour_id"], exc)
 
@@ -365,6 +381,7 @@ def _write_geojson(df: pd.DataFrame, out_dir: str, s3_cfg: dict) -> str:
             "geometry": geom,
             "properties": {
                 "harbour_id":             row["harbour_id"],
+                "geometry_kind":          kind,
                 "h3_cells":               cells,
                 "n_cells":                int(row["n_cells"]),
                 "n_events":               int(row["n_events"]),
@@ -392,7 +409,8 @@ def _write_geojson(df: pd.DataFrame, out_dir: str, s3_cfg: dict) -> str:
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(geojson, f, ensure_ascii=False, indent=2)
 
-    logger.info("Wrote harbours.geojson (%d features) → %s", len(features), out_path)
+    logger.info("Wrote %s (%d features, %s geometry) → %s",
+                filename, len(features), kind, out_path)
     return out_path
 
 
@@ -400,9 +418,13 @@ def _write_geojson(df: pd.DataFrame, out_dir: str, s3_cfg: dict) -> str:
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def run_phase5(config: Phase5Config) -> tuple[str, str]:
+def run_phase5(config: Phase5Config) -> tuple[str, str, str]:
     """
-    Returns (parquet_path, geojson_path).
+    Returns (parquet_path, geojson_path, cells_geojson_path).
+
+    harbours.geojson       carries the closed harbour outline
+    harbours_cells.geojson carries the exact H3-cell union
+    harbours.parquet       carries both, as outline_wkt and geometry_wkt
     """
     enriched_path = path_join(config.interim_dir, "harbours_enriched.parquet")
     if not is_s3_path(config.interim_dir) and not Path(enriched_path).exists():
@@ -416,6 +438,15 @@ def run_phase5(config: Phase5Config) -> tuple[str, str]:
     else:
         enriched = pd.read_parquet(enriched_path)
     logger.info("  loaded %d enriched clusters", len(enriched))
+
+    # Enriched files written before outlines existed still carry only the cell
+    # union — fall back to it so Phase 5 stays runnable against older interims.
+    if "outline_wkt" not in enriched.columns:
+        logger.warning(
+            "harbours_enriched.parquet has no outline_wkt column — falling back to "
+            "the H3-cell union. Re-run phase4 to generate real outlines."
+        )
+        enriched["outline_wkt"] = enriched["geometry_wkt"]
 
     # Load existing harbour DB (optional)
     cell_index:    dict[str, str] = {}
@@ -434,6 +465,13 @@ def run_phase5(config: Phase5Config) -> tuple[str, str]:
     ensure_dir(config.output_dir)
 
     parquet_path = _write_parquet(result, config.output_dir, config.s3_cfg)
-    geojson_path = _write_geojson(result, config.output_dir, config.s3_cfg)
+    geojson_path = _write_geojson(
+        result, config.output_dir, config.s3_cfg,
+        geometry_col="outline_wkt", filename="harbours.geojson",
+    )
+    cells_path = _write_geojson(
+        result, config.output_dir, config.s3_cfg,
+        geometry_col="geometry_wkt", filename="harbours_cells.geojson",
+    )
 
-    return parquet_path, geojson_path
+    return parquet_path, geojson_path, cells_path

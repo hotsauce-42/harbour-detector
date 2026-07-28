@@ -2,7 +2,8 @@
 Phase 4: Enrichment
 
 For every harbour cluster:
-  1. Polygon   — convert H3 cell set to a GeoJSON geometry via h3.cells_to_geo()
+  1. Polygon   — convert H3 cell set to a GeoJSON geometry via h3.cells_to_geo(),
+                 plus a closed outline polygon of the harbour as a whole
   2. Country   — reverse-geocode the centroid with reverse_geocoder, map cc → full name
   3. City      — nearest populated place (GeoNames cities500, pop > 500) from
                  reverse_geocoder, filtered by min_population in post-processing
@@ -25,7 +26,7 @@ import reverse_geocoder as rg
 from shapely.geometry import mapping, shape
 from shapely.wkt import dumps as to_wkt
 
-from utils.geo import haversine_meters
+from utils.geo import haversine_meters, outline_polygon
 from utils.s3 import (
     build_s3_config,
     get_s3_filesystem,
@@ -50,7 +51,8 @@ ENRICHED_SCHEMA = pa.schema([
     pa.field("bbox_max_lat", pa.float64()),
     pa.field("bbox_min_lon", pa.float64()),
     pa.field("bbox_max_lon", pa.float64()),
-    pa.field("geometry_wkt", pa.string()),  # WKT of H3-cell polygon
+    pa.field("geometry_wkt", pa.string()),  # WKT of exact H3-cell union
+    pa.field("outline_wkt", pa.string()),   # WKT of closed harbour outline
     pa.field("country_iso2", pa.string()),  # ISO 3166-1 alpha-2
     pa.field("country_name", pa.string()),
     pa.field("nearest_city", pa.string()),
@@ -65,13 +67,21 @@ ENRICHED_SCHEMA = pa.schema([
 class Phase4Config:
     interim_dir: str
     city_min_population: int = 1000  # not enforced by reverse_geocoder; kept for docs
+    # Outline generation — see utils.geo.outline_polygon
+    outline_buffer_meters: float = 75.0
+    outline_simplify_meters: float = 0.0
+    outline_fill_holes: bool = True
     s3_cfg: dict = field(default_factory=dict)
 
     @classmethod
     def from_yaml(cls, cfg: dict) -> "Phase4Config":
+        p4 = cfg.get("phase4", {})
         return cls(
             interim_dir=cfg.get("data", {}).get("interim_dir", "data/interim"),
-            city_min_population=cfg.get("phase4", {}).get("city_min_population", 1000),
+            city_min_population=p4.get("city_min_population", 1000),
+            outline_buffer_meters=p4.get("outline_buffer_meters", 75.0),
+            outline_simplify_meters=p4.get("outline_simplify_meters", 0.0),
+            outline_fill_holes=p4.get("outline_fill_holes", True),
             s3_cfg=build_s3_config(cfg.get("s3", {})),
         )
 
@@ -80,31 +90,60 @@ class Phase4Config:
 # Step 1: polygon generation
 # ---------------------------------------------------------------------------
 
-def _make_polygon_wkt(cells: list[str]) -> str | None:
+def _cells_to_geom(cells: list[str]):
     """
-    Convert a list of H3 cells to a WKT polygon string.
-    Returns None if h3.cells_to_geo raises (e.g. empty cell list).
+    Union of a list of H3 cells as a Shapely geometry.
+    Returns None if h3.cells_to_geo raises (e.g. empty cell list) or is empty.
     """
     try:
-        geo_dict = h3.cells_to_geo(cells)
-        geom = shape(geo_dict)
-        if geom.is_empty:
-            return None
-        return to_wkt(geom)
+        geom = shape(h3.cells_to_geo(cells))
     except Exception as exc:
         logger.warning("cells_to_geo failed (%s) — skipping polygon for %d cells", exc, len(cells))
         return None
+    return None if geom.is_empty else geom
 
 
-def _add_polygons(clusters: pd.DataFrame) -> pd.DataFrame:
-    logger.info("Generating H3 polygons for %d clusters …", len(clusters))
+def _make_polygon_wkt(cells: list[str]) -> str | None:
+    """Convert a list of H3 cells to a WKT polygon string of their exact union."""
+    geom = _cells_to_geom(cells)
+    return to_wkt(geom) if geom is not None else None
+
+
+def _add_polygons(clusters: pd.DataFrame, config: Phase4Config) -> pd.DataFrame:
+    """
+    Attach two geometries per cluster:
+
+    geometry_wkt — the exact union of the harbour's hot H3 cells, holes and all
+    outline_wkt  — that union morphologically closed into the harbour outline
+    """
+    logger.info("Generating H3 polygons and outlines for %d clusters …", len(clusters))
     clusters = clusters.copy()
-    clusters["geometry_wkt"] = [
-        _make_polygon_wkt(cells) for cells in clusters["h3_cells"]
+
+    geoms = [_cells_to_geom(cells) for cells in clusters["h3_cells"]]
+    clusters["geometry_wkt"] = [to_wkt(g) if g is not None else None for g in geoms]
+    clusters["outline_wkt"] = [
+        to_wkt(outline_polygon(
+            g,
+            buffer_meters=config.outline_buffer_meters,
+            simplify_meters=config.outline_simplify_meters,
+            fill_holes=config.outline_fill_holes,
+        )) if g is not None else None
+        for g in geoms
     ]
+
     n_failed = clusters["geometry_wkt"].isna().sum()
     if n_failed:
         logger.warning("  %d clusters produced no polygon", n_failed)
+
+    n_multi = sum(
+        1 for w in clusters["outline_wkt"] if w and w.startswith("MULTIPOLYGON")
+    )
+    if n_multi:
+        logger.info(
+            "  %d outlines remained multi-part — raise phase4.outline_buffer_meters "
+            "(currently %.0f m) to merge terminals further apart",
+            n_multi, config.outline_buffer_meters,
+        )
     return clusters
 
 
@@ -189,6 +228,7 @@ def _write_enriched(df: pd.DataFrame, config: Phase4Config) -> str:
             "bbox_min_lon": pa.array(df["bbox_min_lon"], type=pa.float64()),
             "bbox_max_lon": pa.array(df["bbox_max_lon"], type=pa.float64()),
             "geometry_wkt": pa.array(df["geometry_wkt"], type=pa.string()),
+            "outline_wkt": pa.array(df["outline_wkt"], type=pa.string()),
             "country_iso2": pa.array(df["country_iso2"], type=pa.string()),
             "country_name": pa.array(df["country_name"], type=pa.string()),
             "nearest_city": pa.array(df["nearest_city"], type=pa.string()),
@@ -227,6 +267,6 @@ def run_phase4(config: Phase4Config) -> str:
         clusters = pd.read_parquet(clusters_path)
     logger.info("  loaded %d clusters", len(clusters))
 
-    clusters = _add_polygons(clusters)
+    clusters = _add_polygons(clusters, config)
     clusters = _add_geocoding(clusters)
     return _write_enriched(clusters, config)

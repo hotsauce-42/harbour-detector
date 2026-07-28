@@ -53,6 +53,7 @@ def _enriched_row(cluster_id: int, lat: float, lon: float) -> dict:
         "bbox_min_lon":         lon - 0.001,
         "bbox_max_lon":         lon + 0.001,
         "geometry_wkt":         None,
+        "outline_wkt":          None,
         "country_iso2":         "DE",
         "country_name":         "Germany",
         "nearest_city":         "Hamburg",
@@ -222,6 +223,7 @@ def test_geojson_structure(tmp_path):
 
     row = _enriched_row(0, HAMBURG_LAT, HAMBURG_LON)
     row["geometry_wkt"] = wkt
+    row["outline_wkt"]  = wkt
     df  = pd.DataFrame([row])
     df["harbour_id"]       = "test-harbour-id"
     df["matched_existing"] = False
@@ -236,9 +238,35 @@ def test_geojson_structure(tmp_path):
     assert feat["geometry"]["type"] in ("Polygon", "MultiPolygon")
     props = feat["properties"]
     assert props["harbour_id"] == "test-harbour-id"
+    assert props["geometry_kind"] == "outline"
     assert isinstance(props["h3_cells"], list)
     assert "country_name" in props
     assert "nearest_city" in props
+
+
+def test_geojson_geometry_column_selects_source(tmp_path):
+    """_write_geojson takes its geometry from the requested WKT column."""
+    from shapely.geometry import shape
+    from shapely.wkt import dumps as to_wkt
+
+    cells_wkt = to_wkt(shape(h3.cells_to_geo(_cells(HAMBURG_LAT, HAMBURG_LON))))
+
+    row = _enriched_row(0, HAMBURG_LAT, HAMBURG_LON)
+    row["geometry_wkt"] = cells_wkt
+    row["outline_wkt"]  = None          # only the cell union is available
+    df  = pd.DataFrame([row])
+    df["harbour_id"]       = "test-harbour-id"
+    df["matched_existing"] = False
+
+    out = _write_geojson(df, str(tmp_path), {},
+                         geometry_col="geometry_wkt",
+                         filename="harbours_cells.geojson")
+    assert Path(out).name == "harbours_cells.geojson"
+    with open(out) as f:
+        feat = json.load(f)["features"][0]
+
+    assert feat["properties"]["geometry_kind"] == "cells"
+    assert feat["geometry"] is not None
 
 
 def test_run_phase5_no_existing_db(tmp_path):
@@ -249,7 +277,7 @@ def test_run_phase5_no_existing_db(tmp_path):
     _write_enriched(rows, tmp_path / "harbours_enriched.parquet")
 
     config = _base_config(tmp_path)
-    parquet_path, geojson_path = run_phase5(config)
+    parquet_path, geojson_path, cells_path = run_phase5(config)
 
     df = pd.read_parquet(parquet_path)
     assert len(df) == 2
@@ -259,6 +287,16 @@ def test_run_phase5_no_existing_db(tmp_path):
     with open(geojson_path) as f:
         fc = json.load(f)
     assert len(fc["features"]) == 2
+
+    # Both geometry flavours are exported, each into its own file.
+    assert Path(geojson_path).name == "harbours.geojson"
+    assert Path(cells_path).name   == "harbours_cells.geojson"
+    with open(cells_path) as f:
+        cells_fc = json.load(f)
+    assert len(cells_fc["features"]) == 2
+    assert fc["features"][0]["properties"]["geometry_kind"]       == "outline"
+    assert cells_fc["features"][0]["properties"]["geometry_kind"] == "cells"
+    assert {"geometry_wkt", "outline_wkt"} <= set(df.columns)
 
 
 def test_run_phase5_with_existing_db_geojson(tmp_path):
@@ -285,7 +323,7 @@ def test_run_phase5_with_existing_db_geojson(tmp_path):
         json.dump(existing_geojson, f)
 
     config = _base_config(tmp_path, existing_db=str(db_path))
-    parquet_path, _ = run_phase5(config)
+    parquet_path, _, _ = run_phase5(config)
 
     df = pd.read_parquet(parquet_path)
     assert df.iloc[0]["harbour_id"] == "legacy-hh-001"
