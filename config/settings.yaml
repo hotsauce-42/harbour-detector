@@ -39,13 +39,25 @@ phase1:
 
 phase2:
   h3_resolution: 11
-  min_unique_mmsi: 5               # minimum unique vessels to consider a cell a harbour
+  # Per-cell noise floor only (res-11 cells are ~50 m across — single berths
+  # rarely collect many distinct vessels). The real harbour-level vessel
+  # threshold is phase3.min_unique_mmsi_per_cluster.
+  min_unique_mmsi: 2
 
 phase3:
-  # connected component thresholds (tuned in later phase)
+  # cluster-level thresholds
   min_cells_per_harbour: 1
-  # How many H3 rings to look outward when connecting hot cells.
-  # 1 = touching only; 3 bridges small cold-cell gaps within a harbour complex.
+  min_events_per_cluster: 5
+  # Minimum distinct vessels across the whole cluster (exact count, computed
+  # by re-joining stops.parquet). This is where "is it a harbour?" is decided.
+  min_unique_mmsi_per_cluster: 5
+  # Hot cells whose parent cells at this resolution are identical or adjacent
+  # end up in the same cluster. Res 9 parents are ~350 m across — bridges the
+  # cold-cell gaps between terminals of one harbour complex. Set to null to
+  # fall back to fine-cell ring search via cluster_ring_size.
+  connectivity_resolution: 9
+  # Legacy fallback (used only when connectivity_resolution is null): how many
+  # H3 rings to look outward when connecting hot cells.
   cluster_ring_size: 3
 
 phase4:

@@ -42,9 +42,12 @@ All config lives in `config/settings.yaml`, baked into the Docker image. Any key
 
 Entry points:
 - `run.py` — local CLI (run phases individually)
-- `run_pipeline.py` — Docker / Kubernetes entrypoint (runs all five phases sequentially)
+- `run_pipeline.py` — container entrypoint, all five phases sequentially (`deploy/job.yaml`)
+- `run_phase1.py` — container entrypoint, Phase 1 (Spark) only (`deploy/spark_job.yaml`)
+- `run_enrich.py` — container entrypoint, Phases 2–5 (no Spark) (`deploy/job_enrich.yaml`)
 - `deploy/spark_job.yaml` — Spark Operator `SparkApplication` manifest (recommended for production)
 - `deploy/job.yaml` — plain Kubernetes Job manifest (small datasets / testing)
+- `deploy/job_enrich.yaml` — plain Job for Phases 2–5; pairs with `spark_job.yaml`, sequenced externally
 - `deploy/secret.yaml` — S3 credentials Secret template
 
 Key utilities:
@@ -53,6 +56,8 @@ Key utilities:
 - `utils/spark.py` — SparkSession factory with S3A / MinIO config; auto-detects local vs K8s mode
 
 Phase 1 split: `pipeline/extract_stops.py` holds the per-vessel pandas logic (reused as Spark UDF); `pipeline/extract_stops_spark.py` holds the Spark orchestration.
+
+Only Phase 1 uses Spark; Phases 2–5 are plain pandas/geopandas/DuckDB. Phases communicate only through S3 (`interim_dir`/`output_dir`), so they can run in separate pods — `run_phase1.py` (Spark) then `run_enrich.py` (plain pod), ordered by an external orchestrator.
 
 ## Gotchas
 
@@ -71,5 +76,7 @@ Phase 1 split: `pipeline/extract_stops.py` holds the per-vessel pandas logic (re
 - Raw AIS timestamps are stored as **integer seconds** (Unix epoch). Always use `pd.to_datetime(col, unit='s', utc=True)` when converting — omitting `unit='s'` silently produces wrong dates.
 
 - Hadoop S3A JARs (`hadoop-aws-3.3.4.jar`, `aws-java-sdk-bundle-1.12.262.jar`) are downloaded into PySpark's `jars/` directory at Docker build time. If you upgrade PySpark, verify the bundled Hadoop version matches (`python3 -c "import pyspark; print(pyspark.__version__)"` then check `pyspark/jars/hadoop-client-runtime-*.jar`).
+
+- The base shell has no `python` on PATH — use `python3`. `ruff` and `pytest` are installed only inside `~/harbour-venv`, not the base shell; `source ~/harbour-venv/bin/activate` first (or invoke their full venv paths).
 
 - Hadoop S3A does not support `**` glob patterns. `extract_stops_spark.py` handles this via `_base_dir(glob)` (strips glob chars from the path) and `recursiveFileLookup=true` on the Spark reader. Do not pass a `**` glob directly to `spark.read`.

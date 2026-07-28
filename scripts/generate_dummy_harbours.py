@@ -69,7 +69,7 @@ def make_feature(row: tuple) -> dict:
             "h3_cells":               cells,
             "n_cells":                len(cells),
             "n_events":               n_events,
-            "n_unique_mmsi_approx":   n_vessels,
+            "n_unique_mmsi":          n_vessels,
             "n_draught_changes":      n_draught,
             "centroid_lat":           round(clat, 6),
             "centroid_lon":           round(clon, 6),

@@ -51,7 +51,7 @@ def _build_display_df(features: list[dict]) -> pd.DataFrame:
             "Region":  p.get("admin1", ""),
             "Country": p.get("country_name", ""),
             "Events":  int(p.get("n_events", 0)),
-            "Vessels": int(p.get("n_unique_mmsi_approx", 0)),
+            "Vessels": int(p.get("n_unique_mmsi", p.get("n_unique_mmsi_approx", 0))),
             "Cells":   int(p.get("n_cells", 0)),
         })
     return pd.DataFrame(rows)
@@ -80,12 +80,13 @@ def _build_map(
         city    = props.get("nearest_city", "Harbour")
         hid     = props.get("harbour_id", "")[:8]
         country = props.get("country_name", "")
+        vessels = props.get("n_unique_mmsi", props.get("n_unique_mmsi_approx", 0))
 
         popup_html = f"""
         <b>{city}, {country}</b><br/>
         ID: {hid}…<br/>
         Events: {props.get('n_events', 0):,}<br/>
-        Vessels: {props.get('n_unique_mmsi_approx', 0):,}<br/>
+        Vessels: {vessels:,}<br/>
         H3 cells: {props.get('n_cells', 0)}<br/>
         Draught changes: {props.get('n_draught_changes', 0)}
         """
@@ -213,9 +214,10 @@ def main() -> None:
     st.subheader(loc_str)
 
     # ── Metrics row ────────────────────────────────────────────────────────
+    vessels = props.get("n_unique_mmsi", props.get("n_unique_mmsi_approx", 0))
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Events",          f"{props.get('n_events', 0):,}")
-    m2.metric("Vessels",         f"{props.get('n_unique_mmsi_approx', 0):,}")
+    m2.metric("Vessels",         f"{vessels:,}")
     m3.metric("H3 cells",        props.get("n_cells", 0))
     m4.metric("Draught changes", props.get("n_draught_changes", 0))
     m5.metric("Country",         props.get("country_iso2", ""))

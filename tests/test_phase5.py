@@ -43,7 +43,7 @@ def _enriched_row(cluster_id: int, lat: float, lon: float) -> dict:
         "h3_cells":             cells,
         "n_cells":              len(cells),
         "n_events":             50,
-        "n_unique_mmsi_approx": 15,
+        "n_unique_mmsi":        15,
         "n_draught_changes":    2,
         "centroid_lat":         lat,
         "centroid_lon":         lon,
@@ -97,11 +97,16 @@ def test_make_harbour_id_differs_for_different_cells():
     assert make_harbour_id(cell_a) != make_harbour_id(cell_b)
 
 
-def test_make_harbour_id_is_valid_uuid():
+def test_make_harbour_id_format():
     cell = h3.latlng_to_cell(HAMBURG_LAT, HAMBURG_LON, 8)
-    uid = make_harbour_id(cell)
-    parsed = uuid.UUID(uid)   # raises if not valid
-    assert parsed.version == 5
+    hid = make_harbour_id(cell, "DE")
+    country, _, hex8 = hid.partition("-")
+    assert country == "DE"
+    assert len(hex8) == 8
+    int(hex8, 16)   # raises if not valid hex
+    # deterministic across calls; ZZ fallback when country unknown
+    assert make_harbour_id(cell, "DE") == hid
+    assert make_harbour_id(cell).startswith("ZZ-")
 
 
 def test_jaccard_identical_sets():
@@ -200,7 +205,7 @@ def test_assign_ids_generates_new_when_no_match():
     config = Phase5Config(interim_dir="", output_dir="")
 
     result = _assign_ids(enriched, {}, [], config)
-    expected = make_harbour_id(row["centroid_h3_r8"])
+    expected = make_harbour_id(row["centroid_h3_r8"], row["country_iso2"])
     assert result.iloc[0]["harbour_id"] == expected
     assert result.iloc[0]["matched_existing"] == False
 

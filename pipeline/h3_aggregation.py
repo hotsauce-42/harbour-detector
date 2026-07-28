@@ -2,8 +2,11 @@
 Phase 2: H3 Aggregation
 
 Reads stops.parquet, maps each stop to an H3 cell (resolution 11),
-aggregates per cell, and filters cells below the minimum unique-vessel
-threshold.
+aggregates per cell, and drops cells below a low unique-vessel noise
+floor. The floor is deliberately permissive (default 2): at res 11 a cell
+is only ~50 m across, so single berths rarely collect many distinct
+vessels. The real harbour-level vessel threshold is enforced per cluster
+in Phase 3 (min_unique_mmsi_per_cluster).
 
 Output: data/interim/h3_counts.parquet
 """
@@ -57,7 +60,7 @@ H3_COUNTS_SCHEMA = pa.schema([
 class Phase2Config:
     interim_dir: str
     h3_resolution: int = 11
-    min_unique_mmsi: int = 5
+    min_unique_mmsi: int = 2   # per-cell noise floor only — harbour threshold lives in Phase 3
     draught_change_threshold_m: float = 0.3  # metres — minimum |delta| to count as a change
     s3_cfg: dict = field(default_factory=dict)
 
@@ -67,7 +70,7 @@ class Phase2Config:
         return cls(
             interim_dir=cfg.get("data", {}).get("interim_dir", "data/interim"),
             h3_resolution=p2.get("h3_resolution", 11),
-            min_unique_mmsi=p2.get("min_unique_mmsi", 5),
+            min_unique_mmsi=p2.get("min_unique_mmsi", 2),
             draught_change_threshold_m=p2.get("draught_change_threshold_m", 0.3),
             s3_cfg=build_s3_config(cfg.get("s3", {})),
         )
