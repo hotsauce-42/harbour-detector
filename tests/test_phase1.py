@@ -3,8 +3,7 @@ Unit tests for Phase 1 stop extraction.
 Uses synthetic in-memory Parquet data — no real AIS files needed.
 """
 
-import tempfile
-from datetime import datetime, timezone, timedelta
+from datetime import timedelta
 from pathlib import Path
 
 import numpy as np
@@ -180,9 +179,12 @@ def test_ship_type_joined_as_mode():
         {"mmsi": 111111111, "timestamp_start": _ts(10), "timestamp_end": _ts(12)},
     ])
     type5 = pd.DataFrame([
-        {"mmsi": 111111111, "timestamp": _ts(0),  "draught": 5.0, "destination": None, "ship_type": 70},
-        {"mmsi": 111111111, "timestamp": _ts(6),  "draught": 5.0, "destination": None, "ship_type": 70},
-        {"mmsi": 111111111, "timestamp": _ts(8),  "draught": 5.0, "destination": None, "ship_type": 71},
+        {"mmsi": 111111111, "timestamp": _ts(0), "draught": 5.0,
+         "destination": None, "ship_type": 70},
+        {"mmsi": 111111111, "timestamp": _ts(6), "draught": 5.0,
+         "destination": None, "ship_type": 70},
+        {"mmsi": 111111111, "timestamp": _ts(8), "draught": 5.0,
+         "destination": None, "ship_type": 71},
     ])
     type5["timestamp"] = pd.to_datetime(type5["timestamp"], utc=True)
     config = Phase1Config(raw_glob="", interim_dir="", draught_lookup_hours=6)

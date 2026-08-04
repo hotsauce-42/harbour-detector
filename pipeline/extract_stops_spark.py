@@ -31,7 +31,7 @@ from pipeline.extract_stops import (
     _join_type5_data,
     _label_detection_method,
 )
-from utils.s3 import is_s3_path, path_join
+from utils.s3 import path_join
 
 logger = logging.getLogger(__name__)
 

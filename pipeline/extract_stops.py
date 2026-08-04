@@ -2,7 +2,8 @@
 Phase 1: Stop Extraction
 
 Two complementary strategies:
-  A) Nav-status filter  — ships broadcasting nav_status=moored/anchored (fast DuckDB scan)
+  A) Nav-status filter  — ships broadcasting nav_status=moored/anchored
+     (fast DuckDB scan)
   B) Sustained low-speed — ships that stop without broadcasting correct status
 
 Both produce the same stop-event schema. Overlapping events are deduplicated.
@@ -12,7 +13,6 @@ Type-5 draught data is joined to each stop for arrival/departure draught delta.
 import logging
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Optional
 
 import duckdb
@@ -106,7 +106,9 @@ class Phase1Config:
             max_gap_minutes=p1.get("max_gap_minutes", 15.0),
             min_stop_duration_minutes=p1.get("min_stop_duration_minutes", 30.0),
             min_messages_per_stop=p1.get("min_messages_per_stop", 3),
-            positional_variance_max_meters=p1.get("positional_variance_max_meters", 300.0),
+            positional_variance_max_meters=p1.get(
+                "positional_variance_max_meters", 300.0
+            ),
             mmsi_min=p1.get("mmsi_min", 100_000_000),
             mmsi_max=p1.get("mmsi_max", 999_999_999),
             draught_lookup_hours=p1.get("draught_lookup_hours", 6),
@@ -204,7 +206,9 @@ def _extract_type5_data(config: Phase1Config) -> pd.DataFrame:
           AND {c.col_mmsi} BETWEEN {c.mmsi_min} AND {c.mmsi_max}
     """
 
-    logger.info("DuckDB: extracting type-5 messages (draught, destination, ship_type) …")
+    logger.info(
+        "DuckDB: extracting type-5 messages (draught, destination, ship_type) …"
+    )
     con = duckdb.connect()
     if is_s3_path(c.raw_glob):
         configure_duckdb_s3(con, config.s3_cfg)
@@ -220,7 +224,8 @@ def _extract_type5_data(config: Phase1Config) -> pd.DataFrame:
     df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
 
     # Optional columns: rename if present under a custom name, otherwise add as None
-    for src, dst in [(c.col_destination, "destination"), (c.col_ship_type, "ship_type")]:
+    for src, dst in [(c.col_destination, "destination"),
+                     (c.col_ship_type, "ship_type")]:
         if dst not in df.columns:
             df[dst] = df.pop(src) if src in df.columns else None
 
@@ -283,7 +288,8 @@ def _group_into_segments(vessel_df: pd.DataFrame, config: Phase1Config) -> list[
     return segments
 
 
-def _build_stop_segments(candidates: pd.DataFrame, config: Phase1Config) -> pd.DataFrame:
+def _build_stop_segments(candidates: pd.DataFrame,
+                         config: Phase1Config) -> pd.DataFrame:
     """Apply segment grouping to all vessels."""
     logger.info("Grouping candidate rows into stop segments …")
 
@@ -337,7 +343,8 @@ def _label_detection_method(stops: pd.DataFrame, config: Phase1Config) -> pd.Dat
 # Step 4: join type-5 data (draught + destination + ship_type)
 # ---------------------------------------------------------------------------
 
-def _join_type5_data(stops: pd.DataFrame, type5: pd.DataFrame, config: Phase1Config) -> pd.DataFrame:
+def _join_type5_data(stops: pd.DataFrame, type5: pd.DataFrame,
+                     config: Phase1Config) -> pd.DataFrame:
     """
     For each stop event, join three things from type-5 messages:
 
@@ -364,7 +371,9 @@ def _join_type5_data(stops: pd.DataFrame, type5: pd.DataFrame, config: Phase1Con
     for mmsi, grp in type5.groupby("mmsi"):
         valid = grp["ship_type"].dropna()
         valid = valid[valid > 0]
-        ship_type_mode[int(mmsi)] = int(valid.mode().iloc[0]) if not valid.empty else None
+        ship_type_mode[int(mmsi)] = (
+            int(valid.mode().iloc[0]) if not valid.empty else None
+        )
 
     # Index type5 by mmsi for per-stop lookups
     t5_by_mmsi = {int(mmsi): grp.reset_index(drop=True)
@@ -372,8 +381,8 @@ def _join_type5_data(stops: pd.DataFrame, type5: pd.DataFrame, config: Phase1Con
 
     arrivals = []
     departures = []
-    dest_raws = []
-    dest_locodes = []
+    dest_raws: list[Optional[str]] = []
+    dest_locodes: list[Optional[str]] = []
     ship_types = []
 
     for _, stop in stops.iterrows():
@@ -397,9 +406,11 @@ def _join_type5_data(stops: pd.DataFrame, type5: pd.DataFrame, config: Phase1Con
 
         if not before.empty:
             last_before = before.iloc[-1]
-            arr = float(last_before["draught"]) if pd.notna(last_before["draught"]) and last_before[
-                "draught"] > 0 else np.nan
-            raw_dest = str(last_before["destination"]) if pd.notna(last_before.get("destination")) else None
+            has_draught = (pd.notna(last_before["draught"])
+                           and last_before["draught"] > 0)
+            arr = float(last_before["draught"]) if has_draught else np.nan
+            has_dest = pd.notna(last_before.get("destination"))
+            raw_dest = str(last_before["destination"]) if has_dest else None
         else:
             arr = np.nan
             raw_dest = None
@@ -408,7 +419,9 @@ def _join_type5_data(stops: pd.DataFrame, type5: pd.DataFrame, config: Phase1Con
         after = t5[(t5["timestamp"] >= t_end) &
                    (t5["timestamp"] <= t_end + lookup_td)]
         dep = float(after.iloc[0]["draught"]) if (
-                not after.empty and pd.notna(after.iloc[0]["draught"]) and after.iloc[0]["draught"] > 0
+                not after.empty
+                and pd.notna(after.iloc[0]["draught"])
+                and after.iloc[0]["draught"] > 0
         ) else np.nan
 
         arrivals.append(arr)
@@ -447,7 +460,9 @@ def _write_stops(stops: pd.DataFrame, config: Phase1Config) -> str:
         stops[col] = stops[col].astype("float32")
     stops["n_messages"] = stops["n_messages"].astype("int32")
     stops["nav_status"] = stops["nav_status"].astype("Int16")  # nullable int
-    stops["ship_type"] = pd.to_numeric(stops.get("ship_type"), errors="coerce").astype("Int16")
+    stops["ship_type"] = pd.to_numeric(
+        stops.get("ship_type"), errors="coerce"
+    ).astype("Int16")
 
     table = pa.Table.from_pandas(stops, schema=STOP_SCHEMA, safe=False)
     if is_s3_path(config.interim_dir):
@@ -479,8 +494,11 @@ def run_phase1(config: Phase1Config) -> str:
     stops = _build_stop_segments(candidates, config)
 
     if stops.empty:
-        logger.warning("No stop segments found — check your raw data path and column names.")
-        for col, dtype in [("draught_arrival", "float32"), ("draught_departure", "float32"),
+        logger.warning(
+            "No stop segments found — check your raw data path and column names."
+        )
+        for col, dtype in [("draught_arrival", "float32"),
+                           ("draught_departure", "float32"),
                            ("draught_delta", "float32"), ("detection_method", "string"),
                            ("ship_type", "Int16"), ("destination_raw", "string"),
                            ("destination_locode", "string")]:

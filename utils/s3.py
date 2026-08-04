@@ -74,7 +74,10 @@ def path_join(base: str, *parts: str) -> str:
 
 
 def ensure_dir(path: str) -> None:
-    """Create local directory tree if needed. No-op for S3 paths (S3 has no directories)."""
+    """Create local directory tree if needed.
+
+    No-op for S3 paths (S3 has no directories).
+    """
     if not is_s3_path(path):
         Path(path).mkdir(parents=True, exist_ok=True)
 

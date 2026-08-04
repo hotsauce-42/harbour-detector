@@ -23,7 +23,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-import h3
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -84,7 +83,9 @@ class Phase5Config:
             output_dir=data.get("output_dir", "data/output"),
             existing_db_path=p5.get("existing_db_path"),
             h3_jaccard_threshold=p5.get("h3_jaccard_threshold", 0.3),
-            centroid_match_distance_meters=p5.get("centroid_match_distance_meters", 500.0),
+            centroid_match_distance_meters=p5.get(
+                "centroid_match_distance_meters", 500.0
+            ),
             s3_cfg=build_s3_config(cfg.get("s3", {})),
         )
 
@@ -130,7 +131,9 @@ def _load_existing_db(path: str, s3_cfg: dict) -> pd.DataFrame:
                 fc = json.load(f)
             df = _geojson_to_df(fc)
         else:
-            raise ValueError(f"Unsupported existing DB format: {suffix}. Use .parquet or .geojson")
+            raise ValueError(
+                f"Unsupported existing DB format: {suffix}. Use .parquet or .geojson"
+            )
     else:
         p = Path(path)
         if not p.exists():
@@ -142,7 +145,9 @@ def _load_existing_db(path: str, s3_cfg: dict) -> pd.DataFrame:
                 fc = json.load(f)
             df = _geojson_to_df(fc)
         else:
-            raise ValueError(f"Unsupported existing DB format: {suffix}. Use .parquet or .geojson")
+            raise ValueError(
+                f"Unsupported existing DB format: {suffix}. Use .parquet or .geojson"
+            )
 
     required = {"harbour_id"}
     missing = required - set(df.columns)
@@ -197,8 +202,10 @@ def _build_indexes(
             for cell in cells:
                 cell_index[cell] = hid
 
-        clat = float(row["centroid_lat"]) if "centroid_lat" in row and pd.notna(row.get("centroid_lat")) else None
-        clon = float(row["centroid_lon"]) if "centroid_lon" in row and pd.notna(row.get("centroid_lon")) else None
+        has_lat = "centroid_lat" in row and pd.notna(row.get("centroid_lat"))
+        has_lon = "centroid_lon" in row and pd.notna(row.get("centroid_lon"))
+        clat = float(row["centroid_lat"]) if has_lat else None
+        clon = float(row["centroid_lon"]) if has_lon else None
 
         centroid_list.append({
             "harbour_id":   hid,
@@ -258,7 +265,8 @@ def _find_match(
     for entry in centroid_list:
         if entry["centroid_lat"] is None or entry["centroid_lon"] is None:
             continue
-        dist = haversine_meters(new_lat, new_lon, entry["centroid_lat"], entry["centroid_lon"])
+        dist = haversine_meters(new_lat, new_lon,
+                                entry["centroid_lat"], entry["centroid_lon"])
         if dist <= config.centroid_match_distance_meters:
             return entry["harbour_id"]
 
@@ -282,7 +290,8 @@ def _assign_ids(
     n_new     = 0
 
     for _, row in enriched.iterrows():
-        cells   = set(row["h3_cells"]) if isinstance(row["h3_cells"], (list, tuple)) else set()
+        is_seq  = isinstance(row["h3_cells"], (list, tuple))
+        cells   = set(row["h3_cells"]) if is_seq else set()
         clat    = float(row["centroid_lat"])
         clon    = float(row["centroid_lon"])
 
@@ -293,7 +302,9 @@ def _assign_ids(
             matched_flags.append(True)
             n_matched += 1
         else:
-            harbour_ids.append(make_harbour_id(row["centroid_h3_r8"], row.get("country_iso2")))
+            harbour_ids.append(
+                make_harbour_id(row["centroid_h3_r8"], row.get("country_iso2"))
+            )
             matched_flags.append(False)
             n_new += 1
 
@@ -315,26 +326,29 @@ def _assign_ids(
 def _write_parquet(df: pd.DataFrame, out_dir: str, s3_cfg: dict) -> str:
     out_path = path_join(out_dir, "harbours.parquet")
     h3_cells_array = pa.array(df["h3_cells"].tolist(), type=pa.list_(pa.string()))
+    dist_km_array = pa.array(
+        df["nearest_city_dist_km"].astype("float32"), type=pa.float32()
+    )
 
     table = pa.table(
         {
-            "harbour_id":           pa.array(df["harbour_id"],                    type=pa.string()),
-            "cluster_id":           pa.array(df["cluster_id"],                    type=pa.int32()),
-            "h3_cells":             h3_cells_array,
-            "n_cells":              pa.array(df["n_cells"],                       type=pa.int32()),
-            "n_events":             pa.array(df["n_events"],                      type=pa.int32()),
-            "n_unique_mmsi":        pa.array(df["n_unique_mmsi"],                 type=pa.int32()),
-            "n_draught_changes":    pa.array(df["n_draught_changes"],             type=pa.int32()),
-            "centroid_lat":         pa.array(df["centroid_lat"],                  type=pa.float64()),
-            "centroid_lon":         pa.array(df["centroid_lon"],                  type=pa.float64()),
-            "country_iso2":         pa.array(df["country_iso2"],                  type=pa.string()),
-            "country_name":         pa.array(df["country_name"],                  type=pa.string()),
-            "nearest_city":         pa.array(df["nearest_city"],                  type=pa.string()),
-            "nearest_city_dist_km": pa.array(df["nearest_city_dist_km"].astype("float32"), type=pa.float32()),
-            "admin1":               pa.array(df["admin1"],                        type=pa.string()),
-            "geometry_wkt":         pa.array(df["geometry_wkt"],                  type=pa.string()),
-            "outline_wkt":          pa.array(df["outline_wkt"],                   type=pa.string()),
-            "matched_existing":     pa.array(df["matched_existing"],              type=pa.bool_()),
+            "harbour_id":        pa.array(df["harbour_id"],        type=pa.string()),
+            "cluster_id":        pa.array(df["cluster_id"],        type=pa.int32()),
+            "h3_cells":          h3_cells_array,
+            "n_cells":           pa.array(df["n_cells"],           type=pa.int32()),
+            "n_events":          pa.array(df["n_events"],          type=pa.int32()),
+            "n_unique_mmsi":     pa.array(df["n_unique_mmsi"],     type=pa.int32()),
+            "n_draught_changes": pa.array(df["n_draught_changes"], type=pa.int32()),
+            "centroid_lat":      pa.array(df["centroid_lat"],      type=pa.float64()),
+            "centroid_lon":      pa.array(df["centroid_lon"],      type=pa.float64()),
+            "country_iso2":      pa.array(df["country_iso2"],      type=pa.string()),
+            "country_name":      pa.array(df["country_name"],      type=pa.string()),
+            "nearest_city":      pa.array(df["nearest_city"],      type=pa.string()),
+            "nearest_city_dist_km": dist_km_array,
+            "admin1":            pa.array(df["admin1"],            type=pa.string()),
+            "geometry_wkt":      pa.array(df["geometry_wkt"],      type=pa.string()),
+            "outline_wkt":       pa.array(df["outline_wkt"],       type=pa.string()),
+            "matched_existing":  pa.array(df["matched_existing"],  type=pa.bool_()),
         },
         schema=OUTPUT_SCHEMA,
     )
@@ -372,9 +386,11 @@ def _write_geojson(
             try:
                 geom = mapping(from_wkt(row[geometry_col]))
             except Exception as exc:
-                logger.warning("Could not parse WKT for harbour %s: %s", row["harbour_id"], exc)
+                logger.warning("Could not parse WKT for harbour %s: %s",
+                               row["harbour_id"], exc)
 
-        cells = list(row["h3_cells"]) if isinstance(row["h3_cells"], (list, tuple)) else []
+        is_seq = isinstance(row["h3_cells"], (list, tuple))
+        cells = list(row["h3_cells"]) if is_seq else []
 
         feature = {
             "type": "Feature",
@@ -434,7 +450,9 @@ def run_phase5(config: Phase5Config) -> tuple[str, str, str]:
 
     logger.info("Phase 5: reading %s …", enriched_path)
     if is_s3_path(config.interim_dir):
-        enriched = pd.read_parquet(enriched_path, storage_options=get_s3_storage_options(config.s3_cfg))
+        enriched = pd.read_parquet(
+            enriched_path, storage_options=get_s3_storage_options(config.s3_cfg)
+        )
     else:
         enriched = pd.read_parquet(enriched_path)
     logger.info("  loaded %d enriched clusters", len(enriched))
@@ -456,7 +474,9 @@ def run_phase5(config: Phase5Config) -> tuple[str, str, str]:
         existing = _load_existing_db(config.existing_db_path, config.s3_cfg)
         cell_index, centroid_list = _build_indexes(existing)
     else:
-        logger.info("No existing harbour DB supplied — all IDs will be newly generated.")
+        logger.info(
+            "No existing harbour DB supplied — all IDs will be newly generated."
+        )
 
     # Assign IDs
     result = _assign_ids(enriched, cell_index, centroid_list, config)

@@ -1,6 +1,5 @@
 """Unit tests for Phase 3 cluster formation."""
 
-from pathlib import Path
 
 import h3
 import pandas as pd
@@ -123,8 +122,10 @@ def test_cluster_stats_centroid_weighted():
         "n_events":           [100, 10],          # cell_a gets 10× more weight
         "n_unique_mmsi":      [50, 5],
         "n_draught_changes":  [3, 1],
-        "cell_lat":           [h3.cell_to_latlng(cell_a)[0], h3.cell_to_latlng(cell_b)[0]],
-        "cell_lon":           [h3.cell_to_latlng(cell_a)[1], h3.cell_to_latlng(cell_b)[1]],
+        "cell_lat":           [h3.cell_to_latlng(cell_a)[0],
+                               h3.cell_to_latlng(cell_b)[0]],
+        "cell_lon":           [h3.cell_to_latlng(cell_a)[1],
+                               h3.cell_to_latlng(cell_b)[1]],
     })
     records = _cluster_stats([[cell_a, cell_b]], cell_df)
     r = records[0]
@@ -205,7 +206,8 @@ def test_filter_removes_small_clusters():
          "bbox_min_lat": 51.90, "bbox_max_lat": 51.90,
          "bbox_min_lon": 4.47,  "bbox_max_lon": 4.47},
     ])
-    config = Phase3Config(interim_dir="", min_cells_per_cluster=1, min_events_per_cluster=5)
+    config = Phase3Config(interim_dir="", min_cells_per_cluster=1,
+                          min_events_per_cluster=5)
     result = _filter_clusters(df, config)
 
     assert len(result) == 1
@@ -229,9 +231,10 @@ def test_filter_resets_cluster_ids():
 
 def test_run_phase3_end_to_end(tmp_path):
     # Two separate harbour clusters + one isolated noise cell
-    cluster_a = list(h3.grid_disk(h3.latlng_to_cell(53.54, 9.97, RES), 1))  # Hamburg, 7 cells
-    cluster_b = [h3.latlng_to_cell(51.90, 4.47, RES)]                        # Rotterdam, 1 cell
-    noise     = [h3.latlng_to_cell(20.00, 0.00, RES)]                        # 1 event — filtered
+    # Hamburg, 7 cells
+    cluster_a = list(h3.grid_disk(h3.latlng_to_cell(53.54, 9.97, RES), 1))
+    cluster_b = [h3.latlng_to_cell(51.90, 4.47, RES)]   # Rotterdam, 1 cell
+    noise     = [h3.latlng_to_cell(20.00, 0.00, RES)]   # 1 event — filtered
 
     all_cells  = cluster_a + cluster_b + noise
     n_events   = [20] * len(cluster_a) + [20] + [1]

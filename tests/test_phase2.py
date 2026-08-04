@@ -1,11 +1,9 @@
 """Unit tests for Phase 2 H3 aggregation."""
 
-from datetime import timezone
 from pathlib import Path
 
 import h3
 import pandas as pd
-import pytest
 
 from pipeline.h3_aggregation import (
     Phase2Config,
@@ -67,9 +65,12 @@ def test_cell_centre_matches_h3():
 def test_unique_mmsi_counted_correctly():
     # 3 stops from 2 distinct vessels at the same location
     stops = _make_stops([
-        {"mmsi": 111111111, "lat": LAT, "lon": LON, "duration_minutes": 60.0, "draught_delta": None},
-        {"mmsi": 111111111, "lat": LAT, "lon": LON, "duration_minutes": 45.0, "draught_delta": None},
-        {"mmsi": 222222222, "lat": LAT, "lon": LON, "duration_minutes": 90.0, "draught_delta": None},
+        {"mmsi": 111111111, "lat": LAT, "lon": LON,
+         "duration_minutes": 60.0, "draught_delta": None},
+        {"mmsi": 111111111, "lat": LAT, "lon": LON,
+         "duration_minutes": 45.0, "draught_delta": None},
+        {"mmsi": 222222222, "lat": LAT, "lon": LON,
+         "duration_minutes": 90.0, "draught_delta": None},
     ])
     stops = _assign_h3_cells(stops, RES)
     config = Phase2Config(interim_dir="", h3_resolution=RES)
@@ -81,12 +82,16 @@ def test_unique_mmsi_counted_correctly():
 
 def test_filter_removes_low_traffic_cells():
     stops = _make_stops([
-        {"mmsi": 111111111, "lat": LAT,       "lon": LON,       "duration_minutes": 60.0, "draught_delta": None},
+        {"mmsi": 111111111, "lat": LAT, "lon": LON,
+         "duration_minutes": 60.0, "draught_delta": None},
         # busy cell: 3 vessels nearby (same H3 cell)
-        {"mmsi": 222222222, "lat": LAT,       "lon": LON,       "duration_minutes": 60.0, "draught_delta": None},
-        {"mmsi": 333333333, "lat": LAT,       "lon": LON,       "duration_minutes": 60.0, "draught_delta": None},
+        {"mmsi": 222222222, "lat": LAT, "lon": LON,
+         "duration_minutes": 60.0, "draught_delta": None},
+        {"mmsi": 333333333, "lat": LAT, "lon": LON,
+         "duration_minutes": 60.0, "draught_delta": None},
         # quiet cell: 1 vessel far away
-        {"mmsi": 444444444, "lat": LAT + 5.0, "lon": LON + 5.0, "duration_minutes": 60.0, "draught_delta": None},
+        {"mmsi": 444444444, "lat": LAT + 5.0, "lon": LON + 5.0,
+         "duration_minutes": 60.0, "draught_delta": None},
     ])
     stops = _assign_h3_cells(stops, RES)
     config = Phase2Config(interim_dir="", h3_resolution=RES, min_unique_mmsi=2)
@@ -99,12 +104,16 @@ def test_filter_removes_low_traffic_cells():
 
 def test_draught_change_counted():
     stops = _make_stops([
-        {"mmsi": 111111111, "lat": LAT, "lon": LON, "duration_minutes": 60.0, "draught_delta":  1.2},
-        {"mmsi": 222222222, "lat": LAT, "lon": LON, "duration_minutes": 60.0, "draught_delta":  0.1},
-        {"mmsi": 333333333, "lat": LAT, "lon": LON, "duration_minutes": 60.0, "draught_delta": -0.8},
+        {"mmsi": 111111111, "lat": LAT, "lon": LON,
+         "duration_minutes": 60.0, "draught_delta":  1.2},
+        {"mmsi": 222222222, "lat": LAT, "lon": LON,
+         "duration_minutes": 60.0, "draught_delta":  0.1},
+        {"mmsi": 333333333, "lat": LAT, "lon": LON,
+         "duration_minutes": 60.0, "draught_delta": -0.8},
     ])
     stops = _assign_h3_cells(stops, RES)
-    config = Phase2Config(interim_dir="", h3_resolution=RES, draught_change_threshold_m=0.3)
+    config = Phase2Config(interim_dir="", h3_resolution=RES,
+                          draught_change_threshold_m=0.3)
     agg = _aggregate(stops, config)
 
     # 1.2 and 0.8 exceed threshold, 0.1 does not
@@ -118,10 +127,14 @@ def test_draught_change_counted():
 def test_max_visits_per_mmsi_single_vessel_multiple_stops():
     # Same vessel stops 3 times in same cell, another vessel once
     stops = _make_stops([
-        {"mmsi": 111111111, "lat": LAT, "lon": LON, "duration_minutes": 60.0, "draught_delta": None},
-        {"mmsi": 111111111, "lat": LAT, "lon": LON, "duration_minutes": 60.0, "draught_delta": None},
-        {"mmsi": 111111111, "lat": LAT, "lon": LON, "duration_minutes": 60.0, "draught_delta": None},
-        {"mmsi": 222222222, "lat": LAT, "lon": LON, "duration_minutes": 60.0, "draught_delta": None},
+        {"mmsi": 111111111, "lat": LAT, "lon": LON,
+         "duration_minutes": 60.0, "draught_delta": None},
+        {"mmsi": 111111111, "lat": LAT, "lon": LON,
+         "duration_minutes": 60.0, "draught_delta": None},
+        {"mmsi": 111111111, "lat": LAT, "lon": LON,
+         "duration_minutes": 60.0, "draught_delta": None},
+        {"mmsi": 222222222, "lat": LAT, "lon": LON,
+         "duration_minutes": 60.0, "draught_delta": None},
     ])
     stops = _assign_h3_cells(stops, RES)
     config = Phase2Config(interim_dir="", h3_resolution=RES)
@@ -132,10 +145,14 @@ def test_max_visits_per_mmsi_single_vessel_multiple_stops():
 def test_mean_visits_per_mmsi():
     # 3 stops from vessel A, 1 from vessel B → mean = (3+1)/2 = 2.0
     stops = _make_stops([
-        {"mmsi": 111111111, "lat": LAT, "lon": LON, "duration_minutes": 60.0, "draught_delta": None},
-        {"mmsi": 111111111, "lat": LAT, "lon": LON, "duration_minutes": 60.0, "draught_delta": None},
-        {"mmsi": 111111111, "lat": LAT, "lon": LON, "duration_minutes": 60.0, "draught_delta": None},
-        {"mmsi": 222222222, "lat": LAT, "lon": LON, "duration_minutes": 60.0, "draught_delta": None},
+        {"mmsi": 111111111, "lat": LAT, "lon": LON,
+         "duration_minutes": 60.0, "draught_delta": None},
+        {"mmsi": 111111111, "lat": LAT, "lon": LON,
+         "duration_minutes": 60.0, "draught_delta": None},
+        {"mmsi": 111111111, "lat": LAT, "lon": LON,
+         "duration_minutes": 60.0, "draught_delta": None},
+        {"mmsi": 222222222, "lat": LAT, "lon": LON,
+         "duration_minutes": 60.0, "draught_delta": None},
     ])
     stops = _assign_h3_cells(stops, RES)
     config = Phase2Config(interim_dir="", h3_resolution=RES)
@@ -228,8 +245,10 @@ def test_run_phase2_end_to_end(tmp_path):
     stops["draught_arrival"]    = None
     stops["draught_departure"]  = None
     stops["destination_raw"]    = None
-    stops["timestamp_start"]    = pd.to_datetime(stops["timestamp_start"]).dt.tz_convert("UTC")
-    stops["timestamp_end"]      = pd.to_datetime(stops["timestamp_end"]).dt.tz_convert("UTC")
+    stops["timestamp_start"]    = pd.to_datetime(
+        stops["timestamp_start"]).dt.tz_convert("UTC")
+    stops["timestamp_end"]      = pd.to_datetime(
+        stops["timestamp_end"]).dt.tz_convert("UTC")
     pq.write_table(pa.Table.from_pandas(stops, schema=STOP_SCHEMA, safe=False),
                    tmp_path / "stops.parquet")
 

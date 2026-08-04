@@ -3,3 +3,9 @@ target-version = "py312"
 
 [lint]
 select = ["E", "F", "W"]
+
+[lint.per-file-ignores]
+# HARBOURS is a hand-aligned 16-column fixture table. The column alignment is
+# what makes it readable; each row needs ~158 chars and cannot be wrapped to 88
+# without turning 20 rows into 60+ unreadable lines.
+"scripts/generate_dummy_harbours.py" = ["E501"]

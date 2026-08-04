@@ -152,12 +152,15 @@ def _build_map(
         layers.append((cells_geom, CELLS_STYLE, f"{city} — H3 cells"))
 
     for geom, style, label in layers:
-        folium.GeoJson(
+        gj = folium.GeoJson(
             geom,
             style_function=lambda _, s=style: s,
             tooltip=folium.Tooltip(f"{label} ({hid}…)"),
-            popup=folium.Popup(popup_html, max_width=260),
-        ).add_to(m)
+        )
+        # Attached as a child rather than via popup=: GeoJson types that kwarg as
+        # GeoJsonPopup (per-feature fields), but we want one static HTML popup.
+        folium.Popup(popup_html, max_width=260).add_to(gj)
+        gj.add_to(m)
 
     # Fit the view to everything drawn (the outline already covers the cells).
     if layers:
@@ -228,7 +231,8 @@ def main() -> None:
         st.divider()
 
         tile_names = [t["name"] for t in tile_layers]
-        default_idx = tile_names.index(default_tile) if default_tile in tile_names else 0
+        default_idx = (tile_names.index(default_tile)
+                       if default_tile in tile_names else 0)
         selected_tile_name = st.selectbox("Map tiles", tile_names, index=default_idx)
         selected_tile = next(t for t in tile_layers if t["name"] == selected_tile_name)
 
@@ -255,7 +259,9 @@ def main() -> None:
         search = st.text_input("Search city / country", placeholder="e.g. Hamburg")
 
         st.divider()
-        sort_col = st.selectbox("Sort list by", ["Events", "Vessels", "Cells", "City", "Country"])
+        sort_col = st.selectbox(
+            "Sort list by", ["Events", "Vessels", "Cells", "City", "Country"]
+        )
         sort_asc = st.checkbox("Ascending", value=False)
 
     # ── Load data ──────────────────────────────────────────────────────────

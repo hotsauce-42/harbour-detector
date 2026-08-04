@@ -21,7 +21,6 @@ def positional_variance_meters(lats: np.ndarray, lons: np.ndarray) -> float:
     if len(lats) < 2:
         return 0.0
     mean_lat = lats.mean()
-    mean_lon = lons.mean()
     lat_std_m = lats.std() * 111_320
     lon_std_m = lons.std() * 111_320 * abs(np.cos(np.radians(mean_lat)))
     return float(np.sqrt(lat_std_m**2 + lon_std_m**2))

@@ -35,7 +35,8 @@ def main() -> None:
     s3_cfg = build_s3_config(cfg.get("s3", {}))
 
     logger.info("━━━ Phase 1: Stop extraction (Spark) ━━━")
-    spark = create_spark_session(s3_cfg, app_name=cfg.get("spark", {}).get("app_name", "harbour-detector"))
+    app_name = cfg.get("spark", {}).get("app_name", "harbour-detector")
+    spark = create_spark_session(s3_cfg, app_name=app_name)
     try:
         out = run_phase1(Phase1Config.from_yaml(cfg), spark)
     finally:

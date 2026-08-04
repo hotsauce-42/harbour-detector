@@ -53,5 +53,6 @@ def _apply_s3a_conf(builder, s3_cfg: dict):
             )
         )
     if s3_cfg.get("region"):
-        builder = builder.config("spark.hadoop.fs.s3a.endpoint.region", s3_cfg["region"])
+        builder = builder.config("spark.hadoop.fs.s3a.endpoint.region",
+                                 s3_cfg["region"])
     return builder

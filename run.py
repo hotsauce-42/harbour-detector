@@ -33,7 +33,8 @@ def cmd_phase1(args, cfg: dict) -> None:
         config.raw_glob = args.raw_glob
 
     s3_cfg = build_s3_config(cfg.get("s3", {}))
-    spark  = create_spark_session(s3_cfg, app_name=cfg.get("spark", {}).get("app_name", "harbour-detector"))
+    app_name = cfg.get("spark", {}).get("app_name", "harbour-detector")
+    spark  = create_spark_session(s3_cfg, app_name=app_name)
     try:
         out = run_phase1(config, spark)
     finally:
@@ -73,7 +74,7 @@ def cmd_phase5(args, cfg: dict) -> None:
         config.existing_db_path = args.existing_db
 
     parquet_path, geojson_path, cells_path = run_phase5(config)
-    print(f"\nPhase 5 complete.")
+    print("\nPhase 5 complete.")
     print(f"  Parquet : {parquet_path}")
     print(f"  Outline : {geojson_path}")
     print(f"  Cells   : {cells_path}")
@@ -90,16 +91,20 @@ def main() -> None:
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    p1 = subparsers.add_parser("phase1", help="Extract stop events from raw Parquet files")
+    p1 = subparsers.add_parser("phase1",
+                               help="Extract stop events from raw Parquet files")
     p1.add_argument("--raw-glob", help="Override raw_glob from settings")
 
     subparsers.add_parser("phase2", help="Aggregate stops into H3 cells")
     subparsers.add_parser("phase3", help="Cluster hot H3 cells into harbour candidates")
-    subparsers.add_parser("phase4", help="Enrich clusters with polygon, country, and city")
+    subparsers.add_parser("phase4",
+                          help="Enrich clusters with polygon, country, and city")
 
-    p5 = subparsers.add_parser("phase5", help="Assign harbour IDs and write GeoJSON output")
+    p5 = subparsers.add_parser("phase5",
+                               help="Assign harbour IDs and write GeoJSON output")
     p5.add_argument("--existing-db",
-                    help="Path to existing harbour database (.geojson or .parquet) for ID matching")
+                    help="Path to existing harbour database (.geojson or "
+                         ".parquet) for ID matching")
 
     args = parser.parse_args()
     _setup_logging(args.verbose)

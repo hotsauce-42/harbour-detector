@@ -20,6 +20,10 @@ python run.py phase5
 python run.py phase1 --raw-glob "data/raw/2024/**/*.parquet"
 python run.py phase5 --existing-db data/reference/existing_harbours.parquet
 
+# Convert a DMA AIS CSV dump (web.ais.dk/aisdata) into time-sliced Parquet
+python3 scripts/convert_aisdk_csv.py ~/Downloads/aisdk-YYYY-MM-DD.zip --out-dir data/raw
+python3 scripts/convert_aisdk_csv.py <zip> --limit-rows 2000000   # quick smoke test
+
 # Tests (self-contained, no AIS files needed)
 pytest
 
@@ -37,6 +41,8 @@ docker push myregistry.io/harbour-detector:1.0.0
 ## Architecture
 
 Five-phase pipeline: stop extraction (Phase 1, **Spark** — `applyInPandas` per MMSI) → H3 aggregation (Phase 2, pandas) → cluster formation (Phase 3, BFS with configurable `cluster_ring_size` to bridge gaps) → enrichment (Phase 4, geopandas + reverse_geocoder) → ID matching/export (Phase 5, deterministic `CC-hex8` IDs e.g. `DE-b8d7e3a2`).
+
+Phase 5 writes three files: `harbours.geojson` (closed harbour outline), `harbours_cells.geojson` (exact H3-cell union), `harbours.parquet` (both, as `outline_wkt` / `geometry_wkt`). The outline is a morphological closing — `utils/geo.outline_polygon()`.
 
 All config lives in `config/settings.yaml`, baked into the Docker image. Any key is overridable at runtime via `SECTION__KEY` env vars — no rebuild needed.
 
@@ -74,6 +80,20 @@ Only Phase 1 uses Spark; Phases 2–5 are plain pandas/geopandas/DuckDB. Phases 
 - MinIO requires `endpoint_url` without a trailing slash and `s3_url_style='path'`. `configure_duckdb_s3()` in `utils/s3.py` handles this automatically. For the Spark path (Phase 1), MinIO also needs `spark.hadoop.fs.s3a.path.style.access=true` — set in `deploy/spark_job.yaml` `sparkConf`.
 
 - Raw AIS timestamps are stored as **integer seconds** (Unix epoch). Always use `pd.to_datetime(col, unit='s', utc=True)` when converting — omitting `unit='s'` silently produces wrong dates.
+
+- pandas 3 parses datetimes at **microsecond** resolution (pandas 2 used nanoseconds). When *writing* epoch seconds use `(ts - EPOCH) // pd.Timedelta(1, "s")` — `.astype("int64") // 1e9` silently yields 1970 dates. (The read side is the `unit='s'` gotcha above.)
+
+- To exercise Phase 1 without starting a JVM, call `_group_into_segments` / `_label_detection_method` / `_join_type5_data` directly — the same functions the Spark UDF runs, and much faster in tests.
+
+- `ruff check .` has ~65 pre-existing errors (mostly E501 in aligned `pa.table({...})` blocks). To prove you added none, compare counts across `git stash` / `git stash pop` — edits shift line numbers, so diffing the messages gives false positives.
+
+- `phase4.outline_simplify_meters` must stay `0`: it is the only step that can pull the outline inside a trafficked cell, and a 10 m tolerance bites up to ~50 m — a whole res-11 cell.
+
+- Streamlit `AppTest`: `st.segmented_control` is reached via `at.button_group`, and `set_value()` needs a **scalar** — a list is silently ignored, so the test passes while the widget never changed.
+
+- pyspark 4.0.0 bundles Hadoop **3.4.1** (`pyspark/jars/hadoop-client-*-3.4.1.jar`), but the Dockerfile downloads `hadoop-aws-3.3.4.jar` and comments that 3.3.4 is bundled. Verify this before trusting the Spark S3A path.
+
+- No `unzip` in the base shell — use Python's `zipfile` for archives.
 
 - Hadoop S3A JARs (`hadoop-aws-3.3.4.jar`, `aws-java-sdk-bundle-1.12.262.jar`) are downloaded into PySpark's `jars/` directory at Docker build time. If you upgrade PySpark, verify the bundled Hadoop version matches (`python3 -c "import pyspark; print(pyspark.__version__)"` then check `pyspark/jars/hadoop-client-runtime-*.jar`).
 

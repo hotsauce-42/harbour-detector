@@ -3,13 +3,12 @@
 import json
 import uuid
 from pathlib import Path
+from typing import Optional
 
 import h3
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
-import pytest
-from shapely.wkt import loads as from_wkt
 
 from pipeline.enrichment import ENRICHED_SCHEMA
 from pipeline.id_matching import (
@@ -22,7 +21,6 @@ from pipeline.id_matching import (
     make_harbour_id,
     run_phase5,
 )
-from utils.geo import haversine_meters
 
 RES = 11
 HAMBURG_LAT,   HAMBURG_LON   = 53.54,  9.97
@@ -75,7 +73,7 @@ def _write_enriched(rows: list[dict], path: Path) -> None:
     pq.write_table(table, path)
 
 
-def _base_config(tmp_path: Path, existing_db: str = None) -> Phase5Config:
+def _base_config(tmp_path: Path, existing_db: Optional[str] = None) -> Phase5Config:
     return Phase5Config(
         interim_dir=str(tmp_path),
         output_dir=str(tmp_path / "output"),
@@ -149,7 +147,8 @@ def test_find_match_by_jaccard():
                           h3_jaccard_threshold=0.3,
                           centroid_match_distance_meters=500.0)
 
-    result = _find_match(cells, HAMBURG_LAT, HAMBURG_LON, cell_idx, centroid_list, config)
+    result = _find_match(cells, HAMBURG_LAT, HAMBURG_LON,
+                         cell_idx, centroid_list, config)
     assert result == "existing-123"
 
 
@@ -164,7 +163,8 @@ def test_find_match_by_centroid_distance():
     config = Phase5Config(interim_dir="", output_dir="",
                           centroid_match_distance_meters=500.0)
 
-    result = _find_match(set(), HAMBURG_LAT, HAMBURG_LON, cell_idx, centroid_list, config)
+    result = _find_match(set(), HAMBURG_LAT, HAMBURG_LON,
+                         cell_idx, centroid_list, config)
     assert result == "existing-456"
 
 
@@ -178,7 +178,8 @@ def test_find_match_returns_none_when_too_far():
     config = Phase5Config(interim_dir="", output_dir="",
                           centroid_match_distance_meters=500.0)
 
-    result = _find_match(set(), HAMBURG_LAT, HAMBURG_LON, cell_idx, centroid_list, config)
+    result = _find_match(set(), HAMBURG_LAT, HAMBURG_LON,
+                         cell_idx, centroid_list, config)
     assert result is None
 
 
@@ -197,7 +198,7 @@ def test_assign_ids_reuses_existing():
     config = Phase5Config(interim_dir="", output_dir="")
     result = _assign_ids(enriched, cell_idx, centroid_list, config)
     assert result.iloc[0]["harbour_id"] == "existing-abc"
-    assert result.iloc[0]["matched_existing"] == True
+    assert result.iloc[0]["matched_existing"]
 
 
 def test_assign_ids_generates_new_when_no_match():
@@ -208,11 +209,10 @@ def test_assign_ids_generates_new_when_no_match():
     result = _assign_ids(enriched, {}, [], config)
     expected = make_harbour_id(row["centroid_h3_r8"], row["country_iso2"])
     assert result.iloc[0]["harbour_id"] == expected
-    assert result.iloc[0]["matched_existing"] == False
+    assert not result.iloc[0]["matched_existing"]
 
 
 def test_geojson_structure(tmp_path):
-    from shapely.geometry import mapping
     from shapely.wkt import dumps as to_wkt
     import h3 as _h3
 
@@ -327,4 +327,4 @@ def test_run_phase5_with_existing_db_geojson(tmp_path):
 
     df = pd.read_parquet(parquet_path)
     assert df.iloc[0]["harbour_id"] == "legacy-hh-001"
-    assert df.iloc[0]["matched_existing"] == True
+    assert df.iloc[0]["matched_existing"]

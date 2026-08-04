@@ -78,7 +78,8 @@ def _apply_section_keys(cfg: dict) -> None:
         if coerced == cfg[section].get(key):
             continue
         cfg[section][key] = coerced
-        logger.info("Config override  %s.%s = %r  (from %s)", section, key, coerced, raw_key)
+        logger.info("Config override  %s.%s = %r  (from %s)",
+                    section, key, coerced, raw_key)
 
 
 def _apply_legacy(cfg: dict) -> None:
@@ -88,7 +89,8 @@ def _apply_legacy(cfg: dict) -> None:
         if not value:
             continue
         cfg.setdefault(section, {})[key] = value
-        logger.info("Config override  %s.%s = %r  (from %s)", section, key, value, env_key)
+        logger.info("Config override  %s.%s = %r  (from %s)",
+                    section, key, value, env_key)
 
 
 def _coerce(value: str, existing):

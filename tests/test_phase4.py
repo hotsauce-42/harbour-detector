@@ -6,7 +6,6 @@ import h3
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
-import pytest
 from shapely.wkt import loads as from_wkt
 
 from pipeline.cluster_formation import CLUSTER_SCHEMA
@@ -54,19 +53,19 @@ def _write_clusters_parquet(rows: list[dict], path: Path) -> None:
     h3_cells_array = pa.array(df["h3_cells"].tolist(), type=pa.list_(pa.string()))
     table = pa.table(
         {
-            "cluster_id":           pa.array(df["cluster_id"],           type=pa.int32()),
-            "h3_cells":             h3_cells_array,
-            "n_cells":              pa.array(df["n_cells"],              type=pa.int32()),
-            "n_events":             pa.array(df["n_events"],             type=pa.int32()),
-            "n_unique_mmsi":        pa.array(df["n_unique_mmsi"],       type=pa.int32()),
-            "n_draught_changes":    pa.array(df["n_draught_changes"],    type=pa.int32()),
-            "centroid_lat":         pa.array(df["centroid_lat"],         type=pa.float64()),
-            "centroid_lon":         pa.array(df["centroid_lon"],         type=pa.float64()),
-            "centroid_h3_r8":       pa.array(df["centroid_h3_r8"],       type=pa.string()),
-            "bbox_min_lat":         pa.array(df["bbox_min_lat"],         type=pa.float64()),
-            "bbox_max_lat":         pa.array(df["bbox_max_lat"],         type=pa.float64()),
-            "bbox_min_lon":         pa.array(df["bbox_min_lon"],         type=pa.float64()),
-            "bbox_max_lon":         pa.array(df["bbox_max_lon"],         type=pa.float64()),
+            "cluster_id":        pa.array(df["cluster_id"],        type=pa.int32()),
+            "h3_cells":          h3_cells_array,
+            "n_cells":           pa.array(df["n_cells"],           type=pa.int32()),
+            "n_events":          pa.array(df["n_events"],          type=pa.int32()),
+            "n_unique_mmsi":     pa.array(df["n_unique_mmsi"],     type=pa.int32()),
+            "n_draught_changes": pa.array(df["n_draught_changes"], type=pa.int32()),
+            "centroid_lat":      pa.array(df["centroid_lat"],      type=pa.float64()),
+            "centroid_lon":      pa.array(df["centroid_lon"],      type=pa.float64()),
+            "centroid_h3_r8":    pa.array(df["centroid_h3_r8"],    type=pa.string()),
+            "bbox_min_lat":      pa.array(df["bbox_min_lat"],      type=pa.float64()),
+            "bbox_max_lat":      pa.array(df["bbox_max_lat"],      type=pa.float64()),
+            "bbox_min_lon":      pa.array(df["bbox_min_lon"],      type=pa.float64()),
+            "bbox_max_lon":      pa.array(df["bbox_max_lon"],      type=pa.float64()),
         },
         schema=CLUSTER_SCHEMA,
     )

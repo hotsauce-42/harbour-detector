@@ -24,9 +24,9 @@ Phase 1's type-5 scan needs. Those rows still qualify as position candidates,
 since the candidate filter never looks at `msg_type`.
 
 Usage:
-    python scripts/convert_aisdk_csv.py /mnt/c/Users/vze/Downloads/aisdk-2026-07-21.zip
-    python scripts/convert_aisdk_csv.py <zip> --out-dir data/raw --slice-minutes 10
-    python scripts/convert_aisdk_csv.py <zip> --limit-rows 2000000   # quick smoke test
+    python3 scripts/convert_aisdk_csv.py /mnt/c/Users/vze/Downloads/aisdk-2026-07-21.zip
+    python3 scripts/convert_aisdk_csv.py <zip> --out-dir data/raw --slice-minutes 10
+    python3 scripts/convert_aisdk_csv.py <zip> --limit-rows 2000000   # quick smoke test
 """
 
 import argparse

@@ -16,14 +16,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import h3
-import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from utils.s3 import (
     build_s3_config,
-    ensure_dir,
     get_s3_filesystem,
     get_s3_storage_options,
     is_s3_path,
@@ -42,7 +40,7 @@ H3_COUNTS_SCHEMA = pa.schema([
     pa.field("cell_lon",               pa.float64()),
     pa.field("n_draught_changes",      pa.int32()),
     # Return-visit indicators
-    pa.field("max_visits_per_mmsi",    pa.int32()),     # max times any single vessel visited
+    pa.field("max_visits_per_mmsi",    pa.int32()),     # max visits by one vessel
     pa.field("mean_visits_per_mmsi",   pa.float32()),   # average visits per vessel
     # Vessel type distribution
     pa.field("n_cargo",                pa.int32()),
@@ -52,7 +50,7 @@ H3_COUNTS_SCHEMA = pa.schema([
     pa.field("n_recreational",         pa.int32()),
     pa.field("n_tug_pilot",            pa.int32()),
     # Destination signal
-    pa.field("top_destination_locode", pa.string()),    # most-reported LOCODE before arrival
+    pa.field("top_destination_locode", pa.string()),    # top LOCODE before arrival
 ])
 
 
@@ -60,8 +58,10 @@ H3_COUNTS_SCHEMA = pa.schema([
 class Phase2Config:
     interim_dir: str
     h3_resolution: int = 11
-    min_unique_mmsi: int = 2   # per-cell noise floor only — harbour threshold lives in Phase 3
-    draught_change_threshold_m: float = 0.3  # metres — minimum |delta| to count as a change
+    # per-cell noise floor only — the harbour threshold lives in Phase 3
+    min_unique_mmsi: int = 2
+    # metres — minimum |delta| to count as a draught change
+    draught_change_threshold_m: float = 0.3
     s3_cfg: dict = field(default_factory=dict)
 
     @classmethod
@@ -102,8 +102,9 @@ def _classify_ship_type(ship_type) -> str:
 # ---------------------------------------------------------------------------
 
 def _assign_h3_cells(stops: pd.DataFrame, resolution: int) -> pd.DataFrame:
-    """Add an h3_cell column to the stops DataFrame."""
-    logger.info("Assigning H3 cells (resolution %d) to %d stops …", resolution, len(stops))
+    """Add a h3_cell column to the stops DataFrame."""
+    logger.info("Assigning H3 cells (resolution %d) to %d stops …",
+                resolution, len(stops))
 
     stops = stops.copy()
     stops["h3_cell"] = [
@@ -125,7 +126,8 @@ def _aggregate(stops: pd.DataFrame, config: Phase2Config) -> pd.DataFrame:
 
     # Draught change flag
     stops["_draught_change"] = (
-        pd.to_numeric(stops["draught_delta"], errors="coerce").abs() >= config.draught_change_threshold_m
+        pd.to_numeric(stops["draught_delta"], errors="coerce").abs()
+        >= config.draught_change_threshold_m
         if "draught_delta" in stops.columns
         else pd.Series(False, index=stops.index)
     ).fillna(False)
@@ -174,7 +176,8 @@ def _aggregate(stops: pd.DataFrame, config: Phase2Config) -> pd.DataFrame:
 
     # Top destination LOCODE: most frequently reported LOCODE among stops in this cell
     if "destination_locode" in stops.columns:
-        dest_stops = stops[stops["destination_locode"].notna() & (stops["destination_locode"] != "")]
+        dest_stops = stops[stops["destination_locode"].notna()
+                           & (stops["destination_locode"] != "")]
         if not dest_stops.empty:
             top_dest = (
                 dest_stops.groupby("h3_cell")["destination_locode"]
@@ -196,7 +199,8 @@ def _aggregate(stops: pd.DataFrame, config: Phase2Config) -> pd.DataFrame:
     int_cols   = ("n_unique_mmsi", "n_events", "n_draught_changes",
                   "n_cargo", "n_tanker", "n_passenger", "n_fishing",
                   "n_recreational", "n_tug_pilot", "max_visits_per_mmsi")
-    float_cols = ("total_duration_minutes", "mean_duration_minutes", "mean_visits_per_mmsi")
+    float_cols = ("total_duration_minutes", "mean_duration_minutes",
+                  "mean_visits_per_mmsi")
     for col in int_cols:
         agg[col] = agg[col].astype("int32")
     for col in float_cols:
@@ -250,11 +254,15 @@ def _write_h3_counts(agg: pd.DataFrame, config: Phase2Config) -> str:
 def run_phase2(config: Phase2Config) -> str:
     stops_path = path_join(config.interim_dir, "stops.parquet")
     if not is_s3_path(config.interim_dir) and not Path(stops_path).exists():
-        raise FileNotFoundError(f"stops.parquet not found at {stops_path} — run phase1 first")
+        raise FileNotFoundError(
+            f"stops.parquet not found at {stops_path} — run phase1 first"
+        )
 
     logger.info("Phase 2: reading %s …", stops_path)
     if is_s3_path(config.interim_dir):
-        stops = pd.read_parquet(stops_path, storage_options=get_s3_storage_options(config.s3_cfg))
+        stops = pd.read_parquet(
+            stops_path, storage_options=get_s3_storage_options(config.s3_cfg)
+        )
     else:
         stops = pd.read_parquet(stops_path)
     logger.info("  loaded %d stop events", len(stops))

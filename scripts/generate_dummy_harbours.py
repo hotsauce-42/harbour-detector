@@ -61,6 +61,8 @@ def make_feature(row: tuple) -> dict:
     clat = sum(c[0] for c in cell_centres) / len(cell_centres)
     clon = sum(c[1] for c in cell_centres) / len(cell_centres)
 
+    locode = iso2 + "".join(c for c in city.upper()[:3] if c.isalpha())
+
     return {
         "type": "Feature",
         "geometry": geom,
@@ -84,7 +86,7 @@ def make_feature(row: tuple) -> dict:
             "n_passenger":            n_passenger,
             "n_fishing":              n_fishing,
             "n_recreational":         n_recreational,
-            "top_destination_locode": iso2 + "".join(c for c in city.upper()[:3] if c.isalpha()),
+            "top_destination_locode": locode,
         },
     }
 

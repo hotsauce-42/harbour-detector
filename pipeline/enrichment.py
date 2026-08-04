@@ -12,7 +12,6 @@ Output: data/interim/harbours_enriched.parquet
         (harbour_id is added in Phase 5; this file uses cluster_id as a temp key)
 """
 
-import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,7 +22,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pycountry
 import reverse_geocoder as rg
-from shapely.geometry import mapping, shape
+from shapely.geometry import shape
 from shapely.wkt import dumps as to_wkt
 
 from utils.geo import haversine_meters, outline_polygon
@@ -98,7 +97,8 @@ def _cells_to_geom(cells: list[str]):
     try:
         geom = shape(h3.cells_to_geo(cells))
     except Exception as exc:
-        logger.warning("cells_to_geo failed (%s) — skipping polygon for %d cells", exc, len(cells))
+        logger.warning("cells_to_geo failed (%s) — skipping polygon for %d cells",
+                       exc, len(cells))
         return None
     return None if geom.is_empty else geom
 
@@ -155,10 +155,10 @@ def _country_name(iso2: str) -> str:
     """Map ISO 3166-1 alpha-2 code to full English country name."""
     if not iso2:
         return ""
-    try:
-        return pycountry.countries.get(alpha_2=iso2).name
-    except AttributeError:
-        return iso2  # fall back to the code itself
+    country = pycountry.countries.get(alpha_2=iso2)
+    if country is None:
+        return iso2  # unknown code — fall back to the code itself
+    return country.name
 
 
 def _add_geocoding(clusters: pd.DataFrame) -> pd.DataFrame:
@@ -211,6 +211,9 @@ def _write_enriched(df: pd.DataFrame, config: Phase4Config) -> str:
     out_path = path_join(config.interim_dir, "harbours_enriched.parquet")
 
     h3_cells_array = pa.array(df["h3_cells"].tolist(), type=pa.list_(pa.string()))
+    dist_km_array = pa.array(
+        df["nearest_city_dist_km"].astype("float32"), type=pa.float32()
+    )
 
     table = pa.table(
         {
@@ -234,7 +237,7 @@ def _write_enriched(df: pd.DataFrame, config: Phase4Config) -> str:
             "nearest_city": pa.array(df["nearest_city"], type=pa.string()),
             "nearest_city_lat": pa.array(df["nearest_city_lat"], type=pa.float64()),
             "nearest_city_lon": pa.array(df["nearest_city_lon"], type=pa.float64()),
-            "nearest_city_dist_km": pa.array(df["nearest_city_dist_km"].astype("float32"), type=pa.float32()),
+            "nearest_city_dist_km": dist_km_array,
             "admin1": pa.array(df["admin1"], type=pa.string()),
         },
         schema=ENRICHED_SCHEMA,
@@ -262,7 +265,9 @@ def run_phase4(config: Phase4Config) -> str:
 
     logger.info("Phase 4: reading %s …", clusters_path)
     if is_s3_path(config.interim_dir):
-        clusters = pd.read_parquet(clusters_path, storage_options=get_s3_storage_options(config.s3_cfg))
+        clusters = pd.read_parquet(
+            clusters_path, storage_options=get_s3_storage_options(config.s3_cfg)
+        )
     else:
         clusters = pd.read_parquet(clusters_path)
     logger.info("  loaded %d clusters", len(clusters))
