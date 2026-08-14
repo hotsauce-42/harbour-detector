@@ -13,7 +13,7 @@ Detects and maps harbours worldwide from historical AIS data. The pipeline proce
 2. **Phase 2 — H3 aggregation**: Project each stop event onto an H3 hexagonal grid at resolution 11 (~25 m cell edge). Count events, unique vessels, and vessel-type distribution per cell.
 3. **Phase 3 — Cluster formation**: Build connected components from H3 cells that lie within `cluster_ring_size` rings of each other (BFS). The ring gap bridges cold cells between parts of the same harbour complex. Each component becomes one harbour candidate.
 4. **Phase 4 — Enrichment**: Generate a polygon (GeoJSON geometry) from the H3 cell set. Reverse-geocode the centroid to find country and nearest city.
-5. **Phase 5 — ID matching**: Assign each harbour a deterministic UUID5 based on its coarse H3 centroid cell (resolution 8). Optionally match against an existing harbour database to preserve historical IDs.
+5. **Phase 5 — ID matching**: Assign each harbour a deterministic UUID5 based on its coarse H3 centroid cell (resolution 8). Optionally match against an existing harbour database to preserve historical IDs and any manual metadata corrections made in the GUI.
 
 ### Stop detection logic
 
@@ -33,7 +33,7 @@ When an existing harbour database is provided, Phase 5 tries to match each detec
 1. **H3 Jaccard overlap** — proportion of shared cells (primary, requires `h3_cells` in the existing DB)
 2. **Centroid distance** — fallback if the existing DB has no cell list
 
-If a match is found above the configured thresholds, the existing ID is reused.
+If a match is found above the configured thresholds, the existing ID is reused — together with any city/region/country corrections the existing record marks as manually edited. See [Keeping manual edits across a re-run](#keeping-manual-edits-across-a-re-run).
 
 ---
 
@@ -128,6 +128,7 @@ Adjust these if your Parquet files use different column names.
 |-----|---------|-------------|
 | `h3_jaccard_threshold` | `0.3` | Minimum H3 cell overlap ratio to match an existing harbour |
 | `centroid_match_distance_meters` | `500` | Fallback: centroid distance threshold for a match |
+| `existing_db_path` | `data/existing_db/harbours.geojson` | Existing harbour database to match against (`.geojson` or `.parquet`, local or `s3://`). Also the file manual GUI corrections are read back from — see [Keeping manual edits across a re-run](#keeping-manual-edits-across-a-re-run). Overridable per run with `--existing-db`. |
 
 ### `spark` — Spark session
 
@@ -351,6 +352,31 @@ streamlit run app.py -- --config config/settings.yaml
 ```
 
 The app opens in your browser. Use the sidebar to switch tile layers, search by city or country, and sort the harbour list. Click any row in the table to show that harbour on the map.
+
+### Editing a harbour's location details
+
+Reverse geocoding gets the country right nearly always, but `nearest_city` is simply whatever GeoNames has closest to the centroid — for a large port that is often a suburb rather than the port city, and `admin1` can be wrong near a regional border. Select a harbour and open **Edit location details** to correct the city, region and country by hand. The harbour ID is not editable — it is what the matching keys on.
+
+Saving writes the new values straight into `harbours.geojson` **and** `harbours_cells.geojson` (both files carry the same properties, so they would otherwise drift apart), and records which fields you touched in a `manual_overrides` array:
+
+```json
+"nearest_city":     "Hamburg-Altona",
+"admin1":           "Hamburg",
+"country_name":     "Germany",
+"manual_overrides": ["nearest_city"]
+```
+
+Editing **Country** also updates `country_iso2` when the name resolves to an ISO 3166-1 code (`Netherlands` → `NL`), so the pair cannot contradict each other. If the name does not resolve, the existing code is left untouched and the app says so.
+
+**Clear manual flags** drops the marker without changing the values, letting the next pipeline run re-derive those fields normally.
+
+### Keeping manual edits across a re-run
+
+Phase 5 reads `manual_overrides` back off the existing harbour database. When a freshly detected cluster matches an existing harbour, the fields listed there are restored from the existing record in place of the freshly geocoded values — every other field still refreshes as usual. A correction therefore survives every later run, while auto-derived values stay free to improve.
+
+Matching itself always runs against the fresh data, so an override can never change *which* harbour a cluster matches — only the metadata it ends up with.
+
+> **The edits must reach the database Phase 5 actually reads.** The GUI writes to `gui.output_file`, but Phase 5 matches against `phase5.existing_db_path`. When those are different files, copy the output across before the next run, or point `existing_db_path` at the output file. The app shows a warning whenever the two paths differ.
 
 ### Testing the GUI without pipeline data
 
@@ -632,6 +658,7 @@ stay separate, so an outline can still be a MultiPolygon — raise
 | `admin1` | string | First-level administrative region |
 | `top_destination_locode` | string | Most common UN/LOCODE in AIS destination strings |
 | `matched_existing` | boolean | Whether the ID was taken from an existing harbour DB |
+| `manual_overrides` | array of strings | Fields corrected by hand in the GUI (`nearest_city`, `admin1`, `country_name`) and restored on the next run instead of being re-geocoded. Empty for untouched harbours. |
 
 ---
 
@@ -658,6 +685,7 @@ harbour-detector/
 ├── utils/
 │   ├── config.py                  # Shared config loader (YAML + env var overrides)
 │   ├── geo.py                     # Haversine distance, positional variance
+│   ├── overrides.py               # Manual GUI corrections shared by app.py and Phase 5
 │   ├── s3.py                      # S3 credential loading, path helpers, DuckDB httpfs setup
 │   └── spark.py                   # SparkSession factory with S3A / MinIO configuration
 ├── tests/                         # Pytest unit tests for all phases

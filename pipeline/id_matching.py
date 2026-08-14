@@ -30,6 +30,12 @@ from shapely.geometry import mapping
 from shapely.wkt import loads as from_wkt
 
 from utils.geo import haversine_meters
+from utils.overrides import (
+    EDITABLE_FIELDS,
+    OVERRIDES_KEY,
+    normalise_overrides,
+    override_values,
+)
 from utils.s3 import (
     build_s3_config,
     ensure_dir,
@@ -62,6 +68,8 @@ OUTPUT_SCHEMA = pa.schema([
     pa.field("geometry_wkt",           pa.string()),  # exact H3-cell union
     pa.field("outline_wkt",            pa.string()),  # closed harbour outline
     pa.field("matched_existing",       pa.bool_()),  # True = reused existing harbour_id
+    # Fields carried over from a GUI correction instead of being re-geocoded
+    pa.field("manual_overrides",       pa.list_(pa.string())),
 ])
 
 
@@ -182,20 +190,26 @@ def _geojson_to_df(fc: dict) -> pd.DataFrame:
 
 def _build_indexes(
     existing: pd.DataFrame,
-) -> tuple[dict[str, str], list[dict]]:
+) -> tuple[dict[str, str], list[dict], dict[str, dict]]:
     """
     Returns:
-      cell_index   : h3_cell → harbour_id  (for Jaccard matching)
-      centroid_list: list of {harbour_id, centroid_lat, centroid_lon, h3_cells}
+      cell_index     : h3_cell → harbour_id  (for Jaccard matching)
+      centroid_list  : list of {harbour_id, centroid_lat, centroid_lon, h3_cells}
+      overrides_by_id: harbour_id → {field: manually corrected value}
     """
     cell_index: dict[str, str] = {}
     centroid_list: list[dict] = []
+    overrides_by_id: dict[str, dict] = {}
 
     has_cells = "h3_cells" in existing.columns
 
     for _, row in existing.iterrows():
         hid = row["harbour_id"]
         cells: list[str] = []
+
+        corrected = override_values(row)
+        if corrected:
+            overrides_by_id[hid] = corrected
 
         if has_cells and isinstance(row["h3_cells"], (list, tuple)):
             cells = list(row["h3_cells"])
@@ -214,7 +228,11 @@ def _build_indexes(
             "h3_cells":     set(cells),
         })
 
-    return cell_index, centroid_list
+    if overrides_by_id:
+        logger.info("Existing DB carries manual overrides for %d harbours",
+                    len(overrides_by_id))
+
+    return cell_index, centroid_list, overrides_by_id
 
 
 # ---------------------------------------------------------------------------
@@ -282,14 +300,29 @@ def _assign_ids(
     cell_index: dict[str, str],
     centroid_list: list[dict],
     config: Phase5Config,
+    overrides_by_id: Optional[dict[str, dict]] = None,
 ) -> pd.DataFrame:
+    """
+    Assign a harbour_id to every cluster and re-apply manual corrections.
+
+    When a cluster matches an existing harbour whose record marks fields as
+    manually overridden, those fields replace the values Phase 4 geocoded. Every
+    other field — and every unmatched harbour — keeps the fresh Phase 4 value.
+    """
+    overrides_by_id = overrides_by_id or {}
+
     harbour_ids    = []
     matched_flags  = []
+    override_lists = []
+    # column → {row position → corrected value}, applied after the loop so the
+    # matching itself always runs against the freshly geocoded data.
+    patches: dict[str, dict[int, object]] = {}
 
-    n_matched = 0
-    n_new     = 0
+    n_matched    = 0
+    n_new        = 0
+    n_overridden = 0
 
-    for _, row in enriched.iterrows():
+    for pos, (_, row) in enumerate(enriched.iterrows()):
         is_seq  = isinstance(row["h3_cells"], (list, tuple))
         cells   = set(row["h3_cells"]) if is_seq else set()
         clat    = float(row["centroid_lat"])
@@ -301,21 +334,44 @@ def _assign_ids(
             harbour_ids.append(existing_id)
             matched_flags.append(True)
             n_matched += 1
+
+            corrected = overrides_by_id.get(existing_id, {})
+            for column, value in corrected.items():
+                patches.setdefault(column, {})[pos] = value
+            fields = [f for f in corrected if f in EDITABLE_FIELDS]
+            override_lists.append(fields)
+            if fields:
+                n_overridden += 1
         else:
             harbour_ids.append(
                 make_harbour_id(row["centroid_h3_r8"], row.get("country_iso2"))
             )
             matched_flags.append(False)
+            override_lists.append([])
             n_new += 1
 
     logger.info(
         "ID assignment: %d matched existing, %d new harbour_ids generated",
         n_matched, n_new,
     )
+    if n_overridden:
+        logger.info("  kept manual city/region/country corrections on %d harbours",
+                    n_overridden)
 
-    enriched = enriched.copy()
+    enriched = enriched.copy().reset_index(drop=True)
+    for column, by_position in patches.items():
+        if column not in enriched.columns:
+            continue
+        # object dtype so a corrected string can land in any column without
+        # tripping over the original pandas dtype.
+        series = enriched[column].astype(object)
+        for pos, value in by_position.items():
+            series.iat[pos] = value
+        enriched[column] = series
+
     enriched["harbour_id"]       = harbour_ids
     enriched["matched_existing"] = matched_flags
+    enriched[OVERRIDES_KEY]      = override_lists
     return enriched
 
 
@@ -328,6 +384,13 @@ def _write_parquet(df: pd.DataFrame, out_dir: str, s3_cfg: dict) -> str:
     h3_cells_array = pa.array(df["h3_cells"].tolist(), type=pa.list_(pa.string()))
     dist_km_array = pa.array(
         df["nearest_city_dist_km"].astype("float32"), type=pa.float32()
+    )
+    stored_overrides = (
+        df[OVERRIDES_KEY] if OVERRIDES_KEY in df.columns else [None] * len(df)
+    )
+    overrides_array = pa.array(
+        [normalise_overrides(v) for v in stored_overrides],
+        type=pa.list_(pa.string()),
     )
 
     table = pa.table(
@@ -349,6 +412,7 @@ def _write_parquet(df: pd.DataFrame, out_dir: str, s3_cfg: dict) -> str:
             "geometry_wkt":      pa.array(df["geometry_wkt"],      type=pa.string()),
             "outline_wkt":       pa.array(df["outline_wkt"],       type=pa.string()),
             "matched_existing":  pa.array(df["matched_existing"],  type=pa.bool_()),
+            "manual_overrides":  overrides_array,
         },
         schema=OUTPUT_SCHEMA,
     )
@@ -411,6 +475,7 @@ def _write_geojson(
                 "nearest_city_dist_km":   round(float(row["nearest_city_dist_km"]), 3),
                 "admin1":                 row["admin1"] or "",
                 "matched_existing":       bool(row["matched_existing"]),
+                "manual_overrides":       normalise_overrides(row.get(OVERRIDES_KEY)),
             },
         }
         features.append(feature)
@@ -467,19 +532,21 @@ def run_phase5(config: Phase5Config) -> tuple[str, str, str]:
         enriched["outline_wkt"] = enriched["geometry_wkt"]
 
     # Load existing harbour DB (optional)
-    cell_index:    dict[str, str] = {}
-    centroid_list: list[dict]     = []
+    cell_index:      dict[str, str] = {}
+    centroid_list:   list[dict]     = []
+    overrides_by_id: dict[str, dict] = {}
 
     if config.existing_db_path:
         existing = _load_existing_db(config.existing_db_path, config.s3_cfg)
-        cell_index, centroid_list = _build_indexes(existing)
+        cell_index, centroid_list, overrides_by_id = _build_indexes(existing)
     else:
         logger.info(
             "No existing harbour DB supplied — all IDs will be newly generated."
         )
 
     # Assign IDs
-    result = _assign_ids(enriched, cell_index, centroid_list, config)
+    result = _assign_ids(enriched, cell_index, centroid_list, config,
+                         overrides_by_id)
 
     # Write outputs
     ensure_dir(config.output_dir)

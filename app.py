@@ -15,6 +15,8 @@ Run:
 """
 
 import json
+import os
+import tempfile
 from pathlib import Path
 
 import folium
@@ -23,6 +25,13 @@ import streamlit as st
 import yaml
 from shapely.geometry import shape
 from streamlit_folium import st_folium
+
+from utils.overrides import (
+    EDITABLE_FIELDS,
+    OVERRIDES_KEY,
+    normalise_overrides,
+    resolve_country_iso2,
+)
 
 # ---------------------------------------------------------------------------
 # Config & data loading
@@ -73,6 +82,129 @@ def _cells_path(output_file: str, gui_cfg: dict) -> str:
         return explicit
     p = Path(output_file)
     return str(p.with_name(f"{p.stem}_cells{p.suffix}"))
+
+
+# ---------------------------------------------------------------------------
+# Manual property edits
+# ---------------------------------------------------------------------------
+
+def _write_feature_collection(path: str, fc: dict) -> None:
+    """
+    Rewrite a GeoJSON file atomically.
+
+    The file is the pipeline's output and may be several MB; a partial write
+    would leave it unparseable, so the new content lands in a sibling temp file
+    and is moved into place in one step.
+    """
+    target = Path(path)
+    handle = tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", dir=target.parent,
+        prefix=f".{target.name}.", suffix=".tmp", delete=False,
+    )
+    try:
+        with handle as fh:
+            json.dump(fc, fh, ensure_ascii=False, indent=2)
+        os.replace(handle.name, target)
+    except BaseException:
+        Path(handle.name).unlink(missing_ok=True)
+        raise
+
+
+def plan_edits(
+    props: dict,
+    new_values: dict[str, str],
+) -> tuple[dict, list[str], str | None]:
+    """
+    Work out what a submitted edit form actually changes.
+
+    Returns (updates, overrides, note):
+      updates   — properties to write, including country_iso2 when the country
+                  name resolved to an ISO code
+      overrides — the field names to record in `manual_overrides`, i.e. the
+                  previously overridden ones plus whatever just changed
+      note      — a message about ISO resolution, or None
+    """
+    updates: dict = {}
+    overrides = normalise_overrides(props.get(OVERRIDES_KEY))
+    note = None
+
+    for field in EDITABLE_FIELDS:
+        value = (new_values.get(field) or "").strip()
+        if value == str(props.get(field) or "").strip():
+            continue
+
+        updates[field] = value
+        if field not in overrides:
+            overrides.append(field)
+
+        if field == "country_name":
+            iso2 = resolve_country_iso2(value)
+            if iso2:
+                updates["country_iso2"] = iso2
+                note = f"Country resolved to ISO code **{iso2}**."
+            else:
+                current = props.get("country_iso2") or "—"
+                note = (f"No ISO code matched “{value}” — `country_iso2` left "
+                        f"as **{current}**.")
+
+    # Keep the marker in a stable order regardless of edit sequence.
+    overrides = [f for f in EDITABLE_FIELDS if f in overrides]
+    return updates, overrides, note
+
+
+def save_harbour_edits(
+    paths: list[str],
+    harbour_id: str,
+    updates: dict,
+    overrides: list[str],
+) -> list[str]:
+    """
+    Persist edited properties for one harbour into every GeoJSON that holds it.
+
+    The outline and H3-cell files carry the same properties with different
+    geometry, so both are updated — otherwise whichever one is later used as the
+    existing harbour database would hand back stale values.
+
+    Returns the paths actually rewritten.
+    """
+    written = []
+    for path in paths:
+        if not path or not Path(path).exists():
+            continue
+        with open(path, encoding="utf-8") as f:
+            fc = json.load(f)
+
+        touched = False
+        for feat in fc.get("features", []):
+            props = feat.setdefault("properties", {})
+            if props.get("harbour_id") != harbour_id:
+                continue
+            props.update(updates)
+            if overrides:
+                props[OVERRIDES_KEY] = overrides
+            else:
+                props.pop(OVERRIDES_KEY, None)
+            touched = True
+
+        if touched:
+            _write_feature_collection(path, fc)
+            written.append(path)
+    return written
+
+
+def _row_for_harbour(
+    df: pd.DataFrame,
+    features: list[dict],
+    harbour_id: str | None,
+) -> int:
+    """Row position of a harbour in the filtered table, or 0 when not present."""
+    if not harbour_id or df.empty:
+        return 0
+    for pos in range(len(df)):
+        idx = int(df.iloc[pos]["_idx"])
+        if features[idx].get("properties", {}).get("harbour_id") == harbour_id:
+            return pos
+    return 0
 
 
 def _build_display_df(features: list[dict]) -> pd.DataFrame:
@@ -171,6 +303,83 @@ def _build_map(
             pass
 
     return m
+
+
+def _edit_panel(feat: dict, paths: list[str], existing_db: str = "") -> None:
+    """Form for correcting a harbour's city / region / country."""
+    props = feat.get("properties", {})
+    hid   = props.get("harbour_id", "")
+    marked = normalise_overrides(props.get(OVERRIDES_KEY))
+
+    title = "Edit location details"
+    if marked:
+        labels = ", ".join(EDITABLE_FIELDS[f] for f in marked)
+        title += f"  •  manually set: {labels}"
+
+    with st.expander(title):
+        st.caption(
+            "Corrections are written straight into the GeoJSON and recorded "
+            "under `manual_overrides`, so Phase 5 reapplies them whenever this "
+            "harbour is matched again. The harbour ID is not editable — it is "
+            "what the match is keyed on."
+        )
+        # Phase 5 reads its existing database, not this output file. When they
+        # are different files, edits only survive a re-run once they are copied
+        # across — say so rather than implying it happens by itself.
+        if existing_db and Path(existing_db) != Path(paths[0]):
+            st.caption(
+                f"⚠️ Edits are saved to `{paths[0]}`, but Phase 5 matches "
+                f"against `{existing_db}`. Copy the file across before the next "
+                "run, or point `phase5.existing_db_path` at the output."
+            )
+
+        with st.form(f"edit_{hid}"):
+            cols = st.columns(len(EDITABLE_FIELDS))
+            new_values = {}
+            for col, (field, label) in zip(cols, EDITABLE_FIELDS.items()):
+                new_values[field] = col.text_input(
+                    f"{label} ●" if field in marked else label,
+                    value=str(props.get(field) or ""),
+                    key=f"edit_{hid}_{field}",
+                )
+            save_col, clear_col = st.columns([1, 1])
+            submitted = save_col.form_submit_button("Save changes",
+                                                    type="primary")
+            cleared = clear_col.form_submit_button(
+                "Clear manual flags", disabled=not marked,
+                help="Keeps the current values but lets the next pipeline run "
+                     "re-derive them from the geocoder.",
+            )
+
+        if submitted:
+            updates, overrides, note = plan_edits(props, new_values)
+            if not updates:
+                st.info("No changes to save.")
+                return
+            written = save_harbour_edits(paths, hid, updates, overrides)
+            if not written:
+                st.error(f"Could not find harbour `{hid}` in any output file.")
+                return
+            changed = [EDITABLE_FIELDS[f] for f in EDITABLE_FIELDS if f in updates]
+            _after_save(hid, note,
+                        f"Saved {', '.join(changed)} to "
+                        f"{', '.join(Path(p).name for p in written)}.")
+
+        if cleared:
+            written = save_harbour_edits(paths, hid, {}, [])
+            _after_save(hid, None,
+                        "Cleared manual flags — the next pipeline run will "
+                        f"re-derive these fields ({len(written)} file(s) updated).")
+
+
+def _after_save(harbour_id: str, note: str | None, message: str) -> None:
+    """Drop the data caches and rerun so the edit is visible immediately."""
+    load_features.clear()
+    load_geometry_by_id.clear()
+    st.session_state["selected_harbour_id"] = harbour_id
+    st.session_state["save_message"] = message
+    st.session_state["save_note"] = note
+    st.rerun()
 
 
 def _map_legend(show: str) -> None:
@@ -306,14 +515,30 @@ def main() -> None:
 
     st.divider()
 
-    # Resolve which harbour is selected
+    # Resolve which harbour is selected. Saving an edit triggers a rerun, which
+    # clears the table selection — fall back to the harbour we were just on
+    # rather than snapping back to the first row.
     selected_rows = getattr(getattr(selection, "selection", None), "rows", [])
-    row_pos       = int(selected_rows[0]) if selected_rows else 0
+    if selected_rows:
+        row_pos = int(selected_rows[0])
+    else:
+        row_pos = _row_for_harbour(
+            df, features, st.session_state.get("selected_harbour_id")
+        )
     row_pos       = min(row_pos, len(df) - 1)
     global_idx    = int(df.iloc[row_pos]["_idx"]) if len(df) > 0 else 0
 
     feat  = features[global_idx]
     props = feat.get("properties", {})
+    st.session_state["selected_harbour_id"] = props.get("harbour_id")
+
+    # Feedback from the save that caused this rerun.
+    message = st.session_state.pop("save_message", None)
+    note    = st.session_state.pop("save_note", None)
+    if message:
+        st.success(message)
+    if note:
+        st.info(note)
 
     # ── Selected harbour (bottom) ─────────────────────────────────────────
     city    = props.get("nearest_city", "Unknown")
@@ -330,6 +555,10 @@ def main() -> None:
     m3.metric("H3 cells",        props.get("n_cells", 0))
     m4.metric("Draught changes", props.get("n_draught_changes", 0))
     m5.metric("Country",         props.get("country_iso2", ""))
+
+    # ── Manual property edits ──────────────────────────────────────────────
+    _edit_panel(feat, [output_file, cells_file],
+                existing_db=cfg.get("phase5", {}).get("existing_db_path", ""))
 
     # ── Map ────────────────────────────────────────────────────────────────
     fmap = _build_map(

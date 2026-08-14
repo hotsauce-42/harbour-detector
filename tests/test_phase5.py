@@ -129,7 +129,7 @@ def test_build_indexes_maps_cells():
         "centroid_lon": HAMBURG_LON,
         "h3_cells":     cells,
     }])
-    cell_idx, centroid_list = _build_indexes(existing)
+    cell_idx, centroid_list, _ = _build_indexes(existing)
     for cell in cells:
         assert cell_idx[cell] == "existing-123"
 
@@ -142,7 +142,7 @@ def test_find_match_by_jaccard():
         "centroid_lon": HAMBURG_LON,
         "h3_cells":     list(cells),
     }])
-    cell_idx, centroid_list = _build_indexes(existing)
+    cell_idx, centroid_list, _ = _build_indexes(existing)
     config = Phase5Config(interim_dir="", output_dir="",
                           h3_jaccard_threshold=0.3,
                           centroid_match_distance_meters=500.0)
@@ -159,7 +159,7 @@ def test_find_match_by_centroid_distance():
         "centroid_lat": HAMBURG_LAT + 0.001,   # ~100m away
         "centroid_lon": HAMBURG_LON,
     }])
-    cell_idx, centroid_list = _build_indexes(existing)
+    cell_idx, centroid_list, _ = _build_indexes(existing)
     config = Phase5Config(interim_dir="", output_dir="",
                           centroid_match_distance_meters=500.0)
 
@@ -174,7 +174,7 @@ def test_find_match_returns_none_when_too_far():
         "centroid_lat": ROTTERDAM_LAT,
         "centroid_lon": ROTTERDAM_LON,
     }])
-    cell_idx, centroid_list = _build_indexes(existing)
+    cell_idx, centroid_list, _ = _build_indexes(existing)
     config = Phase5Config(interim_dir="", output_dir="",
                           centroid_match_distance_meters=500.0)
 
@@ -193,7 +193,7 @@ def test_assign_ids_reuses_existing():
         "centroid_lon": HAMBURG_LON,
         "h3_cells":     row["h3_cells"],
     }])
-    cell_idx, centroid_list = _build_indexes(existing)
+    cell_idx, centroid_list, _ = _build_indexes(existing)
 
     config = Phase5Config(interim_dir="", output_dir="")
     result = _assign_ids(enriched, cell_idx, centroid_list, config)
@@ -328,3 +328,130 @@ def test_run_phase5_with_existing_db_geojson(tmp_path):
     df = pd.read_parquet(parquet_path)
     assert df.iloc[0]["harbour_id"] == "legacy-hh-001"
     assert df.iloc[0]["matched_existing"]
+
+
+# ---------------------------------------------------------------------------
+# Manual overrides carried across a re-run
+# ---------------------------------------------------------------------------
+
+def _existing_db_geojson(path: Path, props: dict) -> None:
+    fc = {
+        "type": "FeatureCollection",
+        "features": [{"type": "Feature", "geometry": None, "properties": props}],
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(fc, f)
+
+
+def test_assign_ids_applies_manual_overrides_on_match():
+    """A matched harbour keeps the corrected city instead of the geocoded one."""
+    row = _enriched_row(0, HAMBURG_LAT, HAMBURG_LON)
+    enriched = pd.DataFrame([row])
+    existing = pd.DataFrame([{
+        "harbour_id":       "existing-abc",
+        "centroid_lat":     HAMBURG_LAT,
+        "centroid_lon":     HAMBURG_LON,
+        "h3_cells":         row["h3_cells"],
+        "nearest_city":     "Hamburg-Altona",
+        "manual_overrides": ["nearest_city"],
+    }])
+    cell_idx, centroid_list, overrides = _build_indexes(existing)
+
+    config = Phase5Config(interim_dir="", output_dir="")
+    result = _assign_ids(enriched, cell_idx, centroid_list, config, overrides)
+
+    assert result.iloc[0]["nearest_city"] == "Hamburg-Altona"
+    assert list(result.iloc[0]["manual_overrides"]) == ["nearest_city"]
+    # Unmarked fields still come from Phase 4's geocoding.
+    assert result.iloc[0]["admin1"] == "Hamburg"
+
+
+def test_assign_ids_ignores_unmarked_existing_values():
+    """Existing values that were never edited must not freeze the fresh ones."""
+    row = _enriched_row(0, HAMBURG_LAT, HAMBURG_LON)
+    enriched = pd.DataFrame([row])
+    existing = pd.DataFrame([{
+        "harbour_id":   "existing-abc",
+        "centroid_lat": HAMBURG_LAT,
+        "centroid_lon": HAMBURG_LON,
+        "h3_cells":     row["h3_cells"],
+        "nearest_city": "Stale Name",       # present, but not marked
+    }])
+    cell_idx, centroid_list, overrides = _build_indexes(existing)
+
+    config = Phase5Config(interim_dir="", output_dir="")
+    result = _assign_ids(enriched, cell_idx, centroid_list, config, overrides)
+
+    assert result.iloc[0]["nearest_city"] == "Hamburg"
+    assert list(result.iloc[0]["manual_overrides"]) == []
+
+
+def test_assign_ids_no_overrides_for_unmatched_harbour():
+    row = _enriched_row(0, HAMBURG_LAT, HAMBURG_LON)
+    result = _assign_ids(pd.DataFrame([row]), {}, [],
+                         Phase5Config(interim_dir="", output_dir=""))
+    assert list(result.iloc[0]["manual_overrides"]) == []
+
+
+def test_assign_ids_override_applies_only_to_matching_row():
+    """With several clusters, a correction must not leak onto its neighbours."""
+    hh = _enriched_row(0, HAMBURG_LAT, HAMBURG_LON)
+    rt = _enriched_row(1, ROTTERDAM_LAT, ROTTERDAM_LON)
+    enriched = pd.DataFrame([hh, rt])
+
+    existing = pd.DataFrame([{
+        "harbour_id":       "existing-rotterdam",
+        "centroid_lat":     ROTTERDAM_LAT,
+        "centroid_lon":     ROTTERDAM_LON,
+        "h3_cells":         rt["h3_cells"],
+        "nearest_city":     "Rotterdam-Maasvlakte",
+        "manual_overrides": ["nearest_city"],
+    }])
+    cell_idx, centroid_list, overrides = _build_indexes(existing)
+
+    config = Phase5Config(interim_dir="", output_dir="")
+    result = _assign_ids(enriched, cell_idx, centroid_list, config, overrides)
+
+    by_cluster = result.set_index("cluster_id")
+    assert by_cluster.loc[1, "nearest_city"] == "Rotterdam-Maasvlakte"
+    assert by_cluster.loc[0, "nearest_city"] == "Hamburg"   # untouched
+
+
+def test_run_phase5_survives_manual_edit_round_trip(tmp_path):
+    """
+    End-to-end: a GUI correction stored in the existing DB reappears in the
+    freshly generated output, and stays marked for the run after that.
+    """
+    cells = _cells(HAMBURG_LAT, HAMBURG_LON)
+    rows  = [_enriched_row(0, HAMBURG_LAT, HAMBURG_LON)]
+    _write_enriched(rows, tmp_path / "harbours_enriched.parquet")
+
+    db_path = tmp_path / "existing.geojson"
+    _existing_db_geojson(db_path, {
+        "harbour_id":       "legacy-hh-001",
+        "centroid_lat":     HAMBURG_LAT,
+        "centroid_lon":     HAMBURG_LON,
+        "h3_cells":         cells,
+        "nearest_city":     "Hamburg-Altona",   # hand-corrected in the GUI
+        "country_name":     "Germany",
+        "country_iso2":     "DE",
+        "manual_overrides": ["nearest_city", "country_name"],
+    })
+
+    config = _base_config(tmp_path, existing_db=str(db_path))
+    parquet_path, geojson_path, cells_path = run_phase5(config)
+
+    df = pd.read_parquet(parquet_path)
+    assert df.iloc[0]["harbour_id"] == "legacy-hh-001"
+    assert df.iloc[0]["nearest_city"] == "Hamburg-Altona"
+    assert sorted(df.iloc[0]["manual_overrides"]) == ["country_name",
+                                                      "nearest_city"]
+
+    # The marker must round-trip through both GeoJSON files, otherwise the
+    # correction is lost the next time one of them is used as the existing DB.
+    for path in (geojson_path, cells_path):
+        with open(path, encoding="utf-8") as f:
+            props = json.load(f)["features"][0]["properties"]
+        assert props["nearest_city"] == "Hamburg-Altona"
+        assert sorted(props["manual_overrides"]) == ["country_name",
+                                                     "nearest_city"]

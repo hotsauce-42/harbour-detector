@@ -11942,10 +11942,13 @@
         "centroid_lon": 8.690064527081471,
         "country_iso2": "DE",
         "country_name": "Germany",
-        "nearest_city": "Dagebull",
+        "nearest_city": "Dagebuell",
         "nearest_city_dist_km": 0.705,
         "admin1": "Schleswig-Holstein",
-        "matched_existing": false
+        "matched_existing": false,
+        "manual_overrides": [
+          "nearest_city"
+        ]
       }
     },
     {
