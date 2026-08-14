@@ -2,7 +2,8 @@
 #
 # Runs H3 aggregation, cluster formation, enrichment, and ID matching/export
 # in a single plain pod. No Spark Operator, executors, or JVM workload — these
-# phases are pandas / geopandas / DuckDB only, so the pod is small.
+# phases are pandas / shapely / DuckDB only, so the pod is small. It uses the
+# enrichment image (Dockerfile.enrich), which ships no JVM and no PySpark.
 #
 # Run this AFTER Phase 1 (deploy/spark_job.yaml) has completed. It reads the
 # Phase 1 output from INTERIM_DIR; if that output is missing the job fails fast
@@ -48,13 +49,14 @@ spec:
 
       containers:
         - name: harbour-detector-enrich
-          image: myregistry.io/harbour-detector:1.0.0
+          image: myregistry.io/harbour-detector-enrich:1.0.0
           imagePullPolicy: Always
-          # Override the image's default entrypoint (full pipeline) to run
-          # only the non-Spark phases.
+          # Already the enrichment image's default entrypoint; stated
+          # explicitly so the pod spec shows what it runs.
+          # For a single phase use e.g. ["python", "run.py", "phase4"].
           command: ["python", "run_enrich.py"]
           resources:
-            # No Spark/JVM here — a single pandas/geopandas process.
+            # No Spark/JVM here — a single pandas/shapely process.
             requests:
               cpu: "1"
               memory: "2Gi"

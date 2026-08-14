@@ -1,9 +1,19 @@
+# harbour-detector — Spark image (Phase 1: stop extraction).
+#
+# Contains the JVM, PySpark and the Hadoop S3A connector JARs. It also carries
+# the full pipeline code, so it can run all five phases in a single pod
+# (deploy/job.yaml) when Spark and enrichment are not split.
+#
+#   docker build -f Dockerfile.spark -t myregistry.io/harbour-detector-spark:1.0.0 .
+#
+# Phases 2-5 alone are better served by the much smaller enrichment image —
+# see Dockerfile.enrich.
 FROM python:3.12-slim
 
-# libgdal-dev: geopandas/fiona runtime; default-jdk-headless: PySpark JVM
+# default-jdk-headless: PySpark JVM. Nothing else is needed at the OS level —
+# every Python dependency ships manylinux wheels.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-    libgdal-dev \
     default-jdk-headless \
  && rm -rf /var/lib/apt/lists/*
 
@@ -15,9 +25,10 @@ ENV PYSPARK_DRIVER_PYTHON=python3
 WORKDIR /app
 
 # Install Python dependencies first so this layer is cached independently
-# of application code changes.
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# of application code changes. requirements-spark.txt = shared runtime deps
+# (requirements-base.txt) + pyspark; no GUI or dev tooling.
+COPY requirements-base.txt requirements-spark.txt ./
+RUN pip install --no-cache-dir -r requirements-spark.txt
 
 # Download S3A connector JARs into PySpark's own jars/ directory so no
 # Maven / internet access is needed at runtime.
@@ -32,7 +43,7 @@ print('S3A JARs downloaded to', d) \
 "
 
 # Pre-warm the reverse_geocoder GeoNames dataset so the image never needs
-# outbound internet access at runtime.
+# outbound internet access at runtime (Phase 4, used by run_pipeline.py).
 RUN python -c "import reverse_geocoder" 2>/dev/null || true
 
 # Application code and default configuration (baked into the image).
@@ -47,8 +58,9 @@ COPY run_pipeline.py run_pipeline.py
 COPY run_phase1.py  run_phase1.py
 COPY run_enrich.py  run_enrich.py
 
-# Default entrypoint runs the full pipeline in one pod (deploy/job.yaml).
-# The split deployment overrides this:
-#   - Phase 1 (Spark)     : run_phase1.py  (deploy/spark_job.yaml)
-#   - Phases 2-5 (no Spark): run_enrich.py (deploy/job_enrich.yaml)
-ENTRYPOINT ["python", "run_pipeline.py"]
+# Default entrypoint runs Phase 1 only (deploy/spark_job.yaml), the reason
+# this image exists. Other entrypoints are available by overriding it:
+#   - all five phases in one pod : run_pipeline.py (deploy/job.yaml)
+#   - phases 2-5                 : run_enrich.py   (or the enrichment image)
+#   - a single phase             : run.py phaseN
+ENTRYPOINT ["python", "run_phase1.py"]

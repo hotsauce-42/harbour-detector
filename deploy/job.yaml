@@ -1,5 +1,8 @@
 # Kubernetes Job — harbour-detector full pipeline (all five phases).
 #
+# Uses the Spark image (Dockerfile.spark), since Phase 1 needs the JVM. For the
+# recommended split deployment see deploy/spark_job.yaml + deploy/job_enrich.yaml.
+#
 # Prerequisites:
 #   kubectl apply -f deploy/secret.yaml   # create the S3 credential secret first
 #
@@ -39,8 +42,11 @@ spec:
 
       containers:
         - name: harbour-detector
-          image: myregistry.io/harbour-detector:1.0.0
+          image: myregistry.io/harbour-detector-spark:1.0.0
           imagePullPolicy: Always
+          # The Spark image defaults to Phase 1 only; override it to run all
+          # five phases sequentially in this single pod.
+          command: ["python", "run_pipeline.py"]
           resources:
             requests:
               cpu: "2"

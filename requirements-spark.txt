@@ -1,0 +1,6 @@
+# Runtime dependencies for the Spark phase (Phase 1) — base plus PySpark.
+# Installed by Dockerfile.spark.
+-r requirements-base.txt
+
+# Spark (Phase 1)
+pyspark==4.0.0

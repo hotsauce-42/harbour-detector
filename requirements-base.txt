@@ -1,0 +1,16 @@
+# Runtime dependencies shared by every phase (1-5).
+# Installed on its own by Dockerfile.enrich (Phases 2-5, no Spark, no JVM).
+duckdb>=0.10.0
+pandas>=2.0.0
+pyarrow>=14.0.0
+numpy>=1.26.0
+pydantic>=2.0.0
+pyyaml>=6.0
+# Phase 2+
+h3>=4.0.0
+shapely>=2.0.0           # geometry only — no geopandas/GDAL anywhere in the pipeline
+reverse_geocoder>=1.5.1
+pycountry>=22.0
+# S3 support
+s3fs>=2023.6.0
+python-dotenv>=1.0.0

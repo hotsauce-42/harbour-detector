@@ -29,7 +29,6 @@ test:
     paths:
       - .cache/pip
   before_script:
-    - apt-get update -qq && apt-get install -y --no-install-recommends libgdal-dev
     - pip install -r requirements.txt
   script:
     - pytest

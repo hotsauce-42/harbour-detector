@@ -2,7 +2,7 @@
 
 ```bash
 # System deps (required before creating venv)
-sudo apt install default-jdk-headless libgdal-dev   # Java for PySpark; GDAL for geopandas
+sudo apt install default-jdk-headless   # Java for PySpark — the only OS-level dep
 
 # Virtual environment — MUST be on Linux filesystem, not /mnt/c/ (NTFS breaks symlinks)
 python3 -m venv ~/harbour-venv
@@ -33,18 +33,26 @@ ruff check .
 # Streamlit GUI
 streamlit run app.py
 
-# Docker
-docker build -t myregistry.io/harbour-detector:1.0.0 .
-docker push myregistry.io/harbour-detector:1.0.0
+# Docker — two images: Spark (Phase 1) and enrichment (Phases 2-5)
+docker build -f Dockerfile.spark  -t myregistry.io/harbour-detector-spark:1.0.0  .
+docker build -f Dockerfile.enrich -t myregistry.io/harbour-detector-enrich:1.0.0 .
+docker push myregistry.io/harbour-detector-spark:1.0.0
+docker push myregistry.io/harbour-detector-enrich:1.0.0
 ```
 
 ## Architecture
 
-Five-phase pipeline: stop extraction (Phase 1, **Spark** — `applyInPandas` per MMSI) → H3 aggregation (Phase 2, pandas) → cluster formation (Phase 3, BFS with configurable `cluster_ring_size` to bridge gaps) → enrichment (Phase 4, geopandas + reverse_geocoder) → ID matching/export (Phase 5, deterministic `CC-hex8` IDs e.g. `DE-b8d7e3a2`).
+Five-phase pipeline: stop extraction (Phase 1, **Spark** — `applyInPandas` per MMSI) → H3 aggregation (Phase 2, pandas) → cluster formation (Phase 3, BFS with configurable `cluster_ring_size` to bridge gaps) → enrichment (Phase 4, shapely + reverse_geocoder) → ID matching/export (Phase 5, deterministic `CC-hex8` IDs e.g. `DE-b8d7e3a2`).
 
 Phase 5 writes three files: `harbours.geojson` (closed harbour outline), `harbours_cells.geojson` (exact H3-cell union), `harbours.parquet` (both, as `outline_wkt` / `geometry_wkt`). The outline is a morphological closing — `utils/geo.outline_polygon()`.
 
-All config lives in `config/settings.yaml`, baked into the Docker image. Any key is overridable at runtime via `SECTION__KEY` env vars — no rebuild needed.
+All config lives in `config/settings.yaml`, baked into both Docker images. Any key is overridable at runtime via `SECTION__KEY` env vars — no rebuild needed.
+
+Two images, mirroring the Spark / non-Spark split:
+- `Dockerfile.spark` → `harbour-detector-spark`: JVM + PySpark + S3A JARs, installs `requirements-spark.txt`. Default entrypoint `run_phase1.py`; carries the full code, so `run_pipeline.py` (all 5 phases, `deploy/job.yaml`) works too.
+- `Dockerfile.enrich` → `harbour-detector-enrich`: no JVM, no PySpark, installs `requirements-base.txt`. Default entrypoint `run_enrich.py`; `run.py phaseN` works for phases 2–5 only.
+
+Requirements split: `requirements-base.txt` (shared runtime) ← `requirements-spark.txt` (+ pyspark) ← `requirements.txt` (+ Streamlit GUI + dev tooling, local dev only).
 
 Entry points:
 - `run.py` — local CLI (run phases individually)
@@ -63,7 +71,7 @@ Key utilities:
 
 Phase 1 split: `pipeline/extract_stops.py` holds the per-vessel pandas logic (reused as Spark UDF); `pipeline/extract_stops_spark.py` holds the Spark orchestration.
 
-Only Phase 1 uses Spark; Phases 2–5 are plain pandas/geopandas/DuckDB. Phases communicate only through S3 (`interim_dir`/`output_dir`), so they can run in separate pods — `run_phase1.py` (Spark) then `run_enrich.py` (plain pod), ordered by an external orchestrator.
+Only Phase 1 uses Spark; Phases 2–5 are plain pandas/shapely/DuckDB. Phases communicate only through S3 (`interim_dir`/`output_dir`), so they can run in separate pods — `run_phase1.py` (Spark) then `run_enrich.py` (plain pod), ordered by an external orchestrator.
 
 ## Gotchas
 
@@ -71,11 +79,11 @@ Only Phase 1 uses Spark; Phases 2–5 are plain pandas/geopandas/DuckDB. Phases 
 
 - Config resolution order (highest wins): env vars → `.env` file → `config/settings.yaml`. Any YAML key is overridable via `SECTION__KEY` env vars (e.g. `PHASE3__CLUSTER_RING_SIZE=5`, `S3__ENDPOINT_URL=http://minio:9000`). Legacy flat vars `RAW_GLOB`, `INTERIM_DIR`, `OUTPUT_DIR`, `EXISTING_DB` also still work. S3 credentials use the standard AWS env vars (`AWS_ACCESS_KEY_ID` etc.).
 
-- `libgdal-dev` must be installed at the OS level (`apt`) for geopandas/fiona — included in the Dockerfile, required on dev hosts too.
+- No geopandas, no GDAL. Geometry is shapely only and GeoJSON is written with `json.dumps` + `shapely.geometry.mapping`, so neither image installs `libgdal-dev` and the enrichment image installs no OS packages at all. Don't reach for `gpd.read_file`/`to_file` — adding geopandas back drags in fiona and the GDAL system library.
 
 - `pytest` cache is redirected to `/tmp` (`pytest.ini`) so test runs leave no state in the working tree.
 
-- `reverse_geocoder` downloads its GeoNames dataset on first import. The Dockerfile pre-warms it during the build so the container needs no outbound internet at runtime.
+- `reverse_geocoder` downloads its GeoNames dataset on first import. Both Dockerfiles pre-warm it during the build so the containers need no outbound internet at runtime.
 
 - MinIO requires `endpoint_url` without a trailing slash and `s3_url_style='path'`. `configure_duckdb_s3()` in `utils/s3.py` handles this automatically. For the Spark path (Phase 1), MinIO also needs `spark.hadoop.fs.s3a.path.style.access=true` — set in `deploy/spark_job.yaml` `sparkConf`.
 
@@ -91,7 +99,7 @@ Only Phase 1 uses Spark; Phases 2–5 are plain pandas/geopandas/DuckDB. Phases 
 
 - Streamlit `AppTest`: `st.segmented_control` is reached via `at.button_group`, and `set_value()` needs a **scalar** — a list is silently ignored, so the test passes while the widget never changed.
 
-- pyspark 4.0.0 bundles Hadoop **3.4.1** (`pyspark/jars/hadoop-client-*-3.4.1.jar`), but the Dockerfile downloads `hadoop-aws-3.3.4.jar` and comments that 3.3.4 is bundled. Verify this before trusting the Spark S3A path.
+- pyspark 4.0.0 bundles Hadoop **3.4.1** (`pyspark/jars/hadoop-client-*-3.4.1.jar`), but `Dockerfile.spark` downloads `hadoop-aws-3.3.4.jar` and comments that 3.3.4 is bundled. Verify this before trusting the Spark S3A path.
 
 - No `unzip` in the base shell — use Python's `zipfile` for archives.
 

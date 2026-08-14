@@ -2,7 +2,7 @@
 Enrichment entrypoint — Phases 2-5 (no Spark).
 
 Runs H3 aggregation, cluster formation, enrichment, and ID matching/export.
-These phases are plain pandas / geopandas / DuckDB code and need no Spark
+These phases are plain pandas / shapely / DuckDB code and need no Spark
 runtime, so they run in a small standalone pod rather than on the Spark driver.
 
 Input is read from INTERIM_DIR (written by Phase 1, run_phase1.py); the final

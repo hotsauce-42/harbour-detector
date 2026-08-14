@@ -40,7 +40,7 @@ spec:
   type: Python
   pythonVersion: "3"
   mode: cluster
-  image: myregistry.io/harbour-detector:1.0.0
+  image: myregistry.io/harbour-detector-spark:1.0.0
   imagePullPolicy: Always
 
   # run_phase1.py: Phase 1 (stop extraction) only. Phases 2-5 run in a

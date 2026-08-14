@@ -1,0 +1,43 @@
+# harbour-detector — enrichment image (Phases 2-5).
+#
+# H3 aggregation, cluster formation, enrichment and ID matching/export are
+# plain pandas / shapely / DuckDB code, so this image ships no JVM and no
+# PySpark — it is a fraction of the size of the Spark image.
+#
+#   docker build -f Dockerfile.enrich -t myregistry.io/harbour-detector-enrich:1.0.0 .
+#
+# Phase 1 needs Spark and runs from the other image — see Dockerfile.spark.
+#
+# No OS packages are needed: every dependency ships manylinux wheels, and the
+# GeoJSON output is written with shapely + json, not geopandas/GDAL.
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Install Python dependencies first so this layer is cached independently
+# of application code changes. requirements-base.txt deliberately excludes
+# pyspark, the GUI and dev tooling.
+COPY requirements-base.txt .
+RUN pip install --no-cache-dir -r requirements-base.txt
+
+# Pre-warm the reverse_geocoder GeoNames dataset (Phase 4) so the image never
+# needs outbound internet access at runtime.
+RUN python -c "import reverse_geocoder" 2>/dev/null || true
+
+# Application code and default configuration (baked into the image).
+# Individual settings are overridable at runtime via environment variables;
+# see run_enrich.py for the full list.
+#
+# pipeline/extract_stops*.py and utils/spark.py are copied along with their
+# packages but are not usable here: `run.py phase1` fails with a missing
+# pyspark module. Run Phase 1 from the Spark image instead.
+COPY config/        config/
+COPY models/        models/
+COPY pipeline/      pipeline/
+COPY utils/         utils/
+COPY run.py         run.py
+COPY run_enrich.py  run_enrich.py
+
+# Default entrypoint runs Phases 2-5 in order (deploy/job_enrich.yaml).
+# To run a single phase, override it:  ["python", "run.py", "phase4"]
+ENTRYPOINT ["python", "run_enrich.py"]

@@ -44,7 +44,8 @@ If a match is found above the configured thresholds, the existing ID is reused �
 **Prerequisites:**
 - Python 3.10+
 - Java 11 or 17 (required by PySpark) — `sudo apt install default-jdk-headless`
-- `libgdal-dev` (required by geopandas) — `sudo apt install libgdal-dev`
+
+No other OS-level packages are needed; every Python dependency installs from a wheel.
 
 ```bash
 python3 -m venv ~/harbour-venv
@@ -390,32 +391,51 @@ This writes `data/output/harbours.geojson` so the GUI has something to display i
 
 ---
 
-## Building the Docker image
+## Building the Docker images
 
-The `Dockerfile` packages the full pipeline into a self-contained image. It includes:
-- Java (for PySpark)
-- The Hadoop S3A connector JARs (`hadoop-aws` + `aws-java-sdk-bundle`), downloaded at build time so the container never needs Maven access at runtime
+There are two images, matching the two halves of the pipeline:
+
+| Dockerfile | Image | Phases | Default entrypoint | Contents |
+|---|---|---|---|---|
+| `Dockerfile.spark` | `harbour-detector-spark` | 1 (and 1–5 if you want one pod) | `run_phase1.py` | JVM + PySpark + S3A JARs + full pipeline code |
+| `Dockerfile.enrich` | `harbour-detector-enrich` | 2–5 | `run_enrich.py` | pandas / shapely / DuckDB only — no JVM, no PySpark, no OS packages |
+
+Both images include:
+- Their default configuration (`config/settings.yaml`), overridable at runtime via environment variables
 - The `reverse_geocoder` GeoNames dataset, pre-warmed so no outbound internet is needed at runtime
+
+The Spark image additionally includes the Hadoop S3A connector JARs (`hadoop-aws` + `aws-java-sdk-bundle`), downloaded at build time so the container never needs Maven access at runtime.
+
+Dependencies are split to match:
+
+| File | Contents |
+|---|---|
+| `requirements-base.txt` | Shared runtime deps — installed by the enrichment image |
+| `requirements-spark.txt` | `requirements-base.txt` + `pyspark` — installed by the Spark image |
+| `requirements.txt` | `requirements-spark.txt` + Streamlit GUI + dev tooling — local development |
 
 ### Build
 
 ```bash
-docker build -t myregistry.io/harbour-detector:1.0.0 .
+docker build -f Dockerfile.spark  -t myregistry.io/harbour-detector-spark:1.0.0  .
+docker build -f Dockerfile.enrich -t myregistry.io/harbour-detector-enrich:1.0.0 .
 ```
 
 ### Push
 
 ```bash
-docker push myregistry.io/harbour-detector:1.0.0
+docker push myregistry.io/harbour-detector-spark:1.0.0
+docker push myregistry.io/harbour-detector-enrich:1.0.0
 ```
 
-Replace `myregistry.io/harbour-detector:1.0.0` with your actual registry and tag.
+Replace `myregistry.io/...` with your actual registry and tag.
 
 ### Local smoke test
 
-Verify the image works before deploying to the cluster:
+Verify the images work before deploying to the cluster:
 
 ```bash
+# Phase 1 (Spark image, its default entrypoint)
 docker run --rm \
   -e RAW_GLOB="s3://my-bucket/ais/**/*.parquet" \
   -e INTERIM_DIR="s3://my-bucket/harbour-detector/interim" \
@@ -423,10 +443,30 @@ docker run --rm \
   -e AWS_ACCESS_KEY_ID="AKIAIOSFODNN7EXAMPLE" \
   -e AWS_SECRET_ACCESS_KEY="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" \
   -e AWS_DEFAULT_REGION="eu-west-1" \
-  myregistry.io/harbour-detector:1.0.0
+  myregistry.io/harbour-detector-spark:1.0.0
+
+# Phases 2-5 (enrichment image, its default entrypoint)
+docker run --rm \
+  -e INTERIM_DIR="s3://my-bucket/harbour-detector/interim" \
+  -e OUTPUT_DIR="s3://my-bucket/harbour-detector/output" \
+  -e AWS_ACCESS_KEY_ID="AKIAIOSFODNN7EXAMPLE" \
+  -e AWS_SECRET_ACCESS_KEY="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" \
+  -e AWS_DEFAULT_REGION="eu-west-1" \
+  myregistry.io/harbour-detector-enrich:1.0.0
 ```
 
 For MinIO add `-e S3_ENDPOINT_URL="http://host.docker.internal:9000"`.
+
+### Running a single phase
+
+Both images ship `run.py`, so any individual phase can be run by overriding the entrypoint — useful for re-running just Phase 4 after a config change:
+
+```bash
+docker run --rm --entrypoint python \
+  myregistry.io/harbour-detector-enrich:1.0.0 run.py phase4
+```
+
+The enrichment image covers phases 2–5; `run.py phase1` needs the Spark image (the enrichment image has no `pyspark`). All five phases in one container is `run_pipeline.py` on the Spark image.
 
 ---
 
@@ -435,7 +475,7 @@ For MinIO add `-e S3_ENDPOINT_URL="http://host.docker.internal:9000"`.
 Only Phase 1 uses Spark. The recommended production deployment **splits the pipeline into two steps** that hand off through S3:
 
 1. **Phase 1** runs on the **Spark Operator** (`deploy/spark_job.yaml`, entrypoint `run_phase1.py`), distributing stop extraction across executor pods.
-2. **Phases 2–5** run in a **plain pod** (`deploy/job_enrich.yaml`, entrypoint `run_enrich.py`) — pandas / geopandas / DuckDB only, no Spark, no executors, so the pod is small.
+2. **Phases 2–5** run in a **plain pod** (`deploy/job_enrich.yaml`, entrypoint `run_enrich.py`) — pandas / shapely / DuckDB only, no Spark, no executors, so the pod is small.
 
 The two steps share no state beyond the S3 paths (`INTERIM_DIR` / `OUTPUT_DIR`), so an external orchestrator just has to run them in order. All intermediate data is written to S3, so failed pods can be retried without re-running earlier phases.
 
@@ -701,9 +741,12 @@ harbour-detector/
 ├── run_pipeline.py                # Container entry point — all 5 phases (job.yaml)
 ├── run_phase1.py                  # Container entry point — Phase 1 only (spark_job.yaml)
 ├── run_enrich.py                  # Container entry point — Phases 2-5 (job_enrich.yaml)
-├── Dockerfile
+├── Dockerfile.spark                # Image for Phase 1 — JVM + PySpark + S3A JARs
+├── Dockerfile.enrich               # Image for Phases 2-5 — no JVM, no PySpark
 ├── .dockerignore
-├── requirements.txt
+├── requirements-base.txt           # Shared runtime deps (enrichment image)
+├── requirements-spark.txt          # Base + pyspark (Spark image)
+├── requirements.txt                # Base + spark + GUI + dev tooling (local)
 └── .env.example                   # Template for local S3 credentials
 ```
 
