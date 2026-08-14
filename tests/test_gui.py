@@ -11,10 +11,20 @@ from pathlib import Path
 import h3
 import pytest
 import yaml
-from shapely.geometry import mapping, shape
+from shapely.geometry import (
+    LineString,
+    MultiPolygon,
+    Polygon,
+    box,
+    mapping,
+    shape,
+)
+from shapely.wkt import dumps as to_wkt
+from shapely.wkt import loads as from_wkt
 from streamlit.testing.v1 import AppTest
 
 import app
+from utils.geo import merge_outlines
 
 RES = 11
 HAMBURG_LAT, HAMBURG_LON = 53.54, 9.97
@@ -315,3 +325,270 @@ def test_row_for_harbour_finds_selection_after_rerun(outputs):
     assert app._row_for_harbour(df, feats, "DE-abcd1234") == 0
     assert app._row_for_harbour(df, feats, "XX-unknown") == 0
     assert app._row_for_harbour(df, feats, None) == 0
+
+
+# ---------------------------------------------------------------------------
+# Manual outline edits
+# ---------------------------------------------------------------------------
+
+def _drawing(geom) -> dict:
+    """One entry as st_folium hands it back in all_drawings."""
+    return {"type": "Feature", "properties": {}, "geometry": mapping(geom)}
+
+
+def _first_feature(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))["features"][0]
+
+
+def test_outline_from_drawings_returns_the_drawn_polygon():
+    drawn = box(9.9, 53.5, 9.91, 53.51)
+    got = app.outline_from_drawings([_drawing(drawn)])
+    assert from_wkt(got).equals(drawn)
+
+
+def test_outline_from_drawings_unions_every_layer():
+    """Whatever is left on the draw layer — seeded parts and new ones — is one
+    outline."""
+    left, right = box(0, 0, 2, 1), box(1, 0, 3, 1)
+    got = from_wkt(app.outline_from_drawings([_drawing(left), _drawing(right)]))
+    assert got.equals(box(0, 0, 3, 1))
+
+
+def test_outline_from_drawings_repairs_a_self_intersection():
+    bowtie = Polygon([(0, 0), (1, 1), (1, 0), (0, 1)])
+    got = from_wkt(app.outline_from_drawings([_drawing(bowtie)]))
+    assert got.is_valid
+    assert got.area == 0.5
+
+
+def test_outline_from_drawings_ignores_non_areal_layers():
+    line = LineString([(0, 0), (1, 1)])
+    assert app.outline_from_drawings([_drawing(line)]) is None
+
+
+def test_outline_from_drawings_with_nothing_drawn():
+    """Deleting every layer is how an operator clears the outline."""
+    assert app.outline_from_drawings(None) is None
+    assert app.outline_from_drawings([]) is None
+
+
+def test_detected_geometry_prefers_the_stored_detected_outline():
+    detected = box(0, 0, 1, 1)
+    feat = {
+        "geometry": mapping(box(0, 0, 5, 5)),      # already merged with an edit
+        "properties": {app.DETECTED_OUTLINE_KEY: to_wkt(detected)},
+    }
+    assert app.detected_geometry(feat).equals(detected)
+
+
+def test_detected_geometry_falls_back_to_the_feature_geometry():
+    """Output written before this feature existed carries no detected outline."""
+    geom = box(0, 0, 1, 1)
+    feat = {"geometry": mapping(geom), "properties": {}}
+    assert app.detected_geometry(feat).equals(geom)
+
+
+def test_detected_geometry_survives_unparseable_wkt():
+    geom = box(0, 0, 1, 1)
+    feat = {"geometry": mapping(geom),
+            "properties": {app.DETECTED_OUTLINE_KEY: "POLYGON ((nope))"}}
+    assert app.detected_geometry(feat).equals(geom)
+
+
+def test_drawn_geometry_reads_the_stored_manual_outline():
+    drawn = box(0, 0, 1, 1)
+    feat = {"properties": {app.MANUAL_OUTLINE_KEY: to_wkt(drawn)}}
+    assert app.drawn_geometry(feat).equals(drawn)
+    assert app.drawn_geometry({"properties": {}}) is None
+
+
+# ── Saving ─────────────────────────────────────────────────────────────────
+
+def test_save_outline_writes_the_baseline_to_both_files(outputs):
+    outline, cells = outputs / "harbours.geojson", outputs / "harbours_cells.geojson"
+    detected = app.detected_geometry(_first_feature(outline))
+    drawn    = box(9.9, 53.5, 9.98, 53.58)
+    merged   = merge_outlines(detected, drawn)
+
+    written = app.save_harbour_outline(
+        [str(outline), str(cells)], str(outline), "DE-abcd1234",
+        to_wkt(drawn), to_wkt(detected), mapping(merged),
+    )
+
+    assert len(written) == 2
+    for path in (outline, cells):
+        props = _props(path)
+        assert from_wkt(props[app.MANUAL_OUTLINE_KEY]).equals(drawn)
+        assert from_wkt(props[app.DETECTED_OUTLINE_KEY]).equals(detected)
+
+
+def test_save_outline_only_changes_the_outline_file_geometry(outputs):
+    """The cells file holds the H3-cell union, which a drawn outline never touches."""
+    outline, cells = outputs / "harbours.geojson", outputs / "harbours_cells.geojson"
+    cells_before = _first_feature(cells)["geometry"]
+    drawn = box(9.9, 53.5, 9.98, 53.58)
+
+    app.save_harbour_outline([str(outline), str(cells)], str(outline),
+                             "DE-abcd1234", to_wkt(drawn), None, mapping(drawn))
+
+    assert _first_feature(cells)["geometry"] == cells_before
+    assert shape(_first_feature(outline)["geometry"]).equals(drawn)
+
+
+def test_save_outline_keeps_property_overrides(outputs):
+    """An outline edit must not disturb a city/region/country correction."""
+    outline = outputs / "harbours.geojson"
+    app.save_harbour_edits([str(outline)], "DE-abcd1234",
+                           {"nearest_city": "Hamburg-Altona"}, ["nearest_city"])
+
+    drawn = box(9.9, 53.5, 9.98, 53.58)
+    app.save_harbour_outline([str(outline)], str(outline), "DE-abcd1234",
+                             to_wkt(drawn), None, mapping(drawn))
+
+    props = _props(outline)
+    assert props["nearest_city"] == "Hamburg-Altona"
+    assert props[app.OVERRIDES_KEY] == ["nearest_city"]
+
+
+def test_reverting_clears_the_manual_outline(outputs):
+    outline = outputs / "harbours.geojson"
+    detected = app.detected_geometry(_first_feature(outline))
+    drawn = box(9.9, 53.5, 9.98, 53.58)
+    app.save_harbour_outline([str(outline)], str(outline), "DE-abcd1234",
+                             to_wkt(drawn), to_wkt(detected),
+                             mapping(merge_outlines(detected, drawn)))
+
+    app.save_harbour_outline([str(outline)], str(outline), "DE-abcd1234",
+                             None, to_wkt(detected), mapping(detected))
+
+    props = _props(outline)
+    assert app.MANUAL_OUTLINE_KEY not in props
+    assert shape(_first_feature(outline)["geometry"]).equals(detected)
+
+
+def test_save_outline_ignores_an_unknown_harbour(outputs):
+    outline = outputs / "harbours.geojson"
+    before = outline.read_text(encoding="utf-8")
+    written = app.save_harbour_outline([str(outline)], str(outline), "XX-nosuchid",
+                                       to_wkt(box(0, 0, 1, 1)), None, None)
+    assert written == []
+    assert outline.read_text(encoding="utf-8") == before
+
+
+# ── Feedback ───────────────────────────────────────────────────────────────
+
+def test_note_warns_that_trimming_will_not_last():
+    detected = box(0, 0, 10, 10)
+    note = app.outline_edit_note(detected, box(0, 0, 5, 10))
+    assert note and "floor" in note
+
+
+def test_note_is_quiet_for_a_pure_extension():
+    detected = box(0, 0, 10, 10)
+    assert app.outline_edit_note(detected, box(0, 0, 12, 10)) is None
+
+
+def test_note_warns_about_a_wildly_oversized_outline():
+    detected = box(0, 0, 1, 1)
+    note = app.outline_edit_note(detected, box(0, 0, 100, 100))
+    assert note and "neighbouring harbour" in note
+
+
+# ── The editable map ───────────────────────────────────────────────────────
+
+def _leaflet(feat, **kwargs) -> str:
+    """The JS streamlit-folium actually ships to the browser for this map."""
+    from streamlit_folium import _get_map_string
+
+    m = app._build_map(feat, "https://tiles/{z}/{x}/{y}.png", "attr", "tiles",
+                       **kwargs)
+    return _get_map_string(m)
+
+
+def test_edit_mode_hands_the_outline_to_the_draw_control(outputs):
+    """
+    The whole interaction hangs on this: Leaflet.Draw edits the feature group
+    it is given, and streamlit-folium reports that same group back as
+    all_drawings only if it renamed it to `drawnItems`.
+    """
+    feats = app.load_features.__wrapped__(str(outputs / "harbours.geojson"))
+    js = _leaflet(feats[0], editable=True)
+
+    assert "options.edit.featureGroup = drawnItems;" in js
+    assert "L.Control.Draw" in js
+    # The outline is seeded as a real polygon layer — an L.geoJson group would
+    # render fine but the edit toolbar would not touch it.
+    assert "L.polygon(" in js
+
+
+def test_edit_mode_does_not_draw_the_outline_twice(outputs):
+    feats = app.load_features.__wrapped__(str(outputs / "harbours.geojson"))
+    assert _leaflet(feats[0], editable=True).count("L.geoJson") == 0
+    assert _leaflet(feats[0], editable=False).count("L.geoJson") == 1
+
+
+def test_view_mode_has_no_draw_control(outputs):
+    feats = app.load_features.__wrapped__(str(outputs / "harbours.geojson"))
+    assert "L.Control.Draw" not in _leaflet(feats[0], editable=False)
+
+
+def test_editable_polygons_keep_every_part_and_hole():
+    ring = Polygon([(0, 0), (10, 0), (10, 10), (0, 10)],
+                   holes=[[(4, 4), (6, 4), (6, 6), (4, 6)]])
+    apart = box(20, 20, 21, 21)
+    polygons = app._editable_polygons(MultiPolygon([ring, apart]), app.OUTLINE_STYLE)
+
+    assert len(polygons) == 2
+    # locations = [exterior, *holes], each a list of (lat, lon) pairs
+    assert len(polygons[0].locations) == 2
+    assert len(polygons[1].locations) == 1
+
+
+def test_editable_polygons_use_lat_lon_order():
+    """GeoJSON is (lon, lat) and Leaflet is (lat, lon) — the classic mix-up."""
+    polygons = app._editable_polygons(box(9.9, 53.5, 9.91, 53.51),
+                                      app.OUTLINE_STYLE)
+    lats = [lat for lat, _ in polygons[0].locations[0]]
+    lons = [lon for _, lon in polygons[0].locations[0]]
+    assert min(lats) > 53 and max(lats) < 54
+    assert min(lons) > 9 and max(lons) < 10
+
+
+def test_outline_controls_appear_only_in_edit_mode(outputs):
+    at = _app_on(outputs)
+    assert not at.exception
+    assert "Save outline" not in [b.label for b in at.button]
+
+    at = at.toggle(key="outline_mode_DE-abcd1234").set_value(True).run()
+
+    assert not at.exception
+    labels = [b.label for b in at.button]
+    assert "Save outline" in labels
+    assert "Revert to detected" in labels
+
+
+def test_saving_is_blocked_until_something_is_drawn(outputs):
+    """st_folium reports no drawings under AppTest, which is the 'nothing drawn'
+    case: the button has to stay inert rather than save an empty outline."""
+    at = _app_on(outputs)
+    at = at.toggle(key="outline_mode_DE-abcd1234").set_value(True).run()
+
+    before = (outputs / "harbours.geojson").read_text(encoding="utf-8")
+    at = _submit(at, "Save outline")
+
+    assert not at.exception
+    assert (outputs / "harbours.geojson").read_text(encoding="utf-8") == before
+
+
+def test_revert_is_offered_for_a_harbour_with_a_manual_outline(outputs):
+    outline = outputs / "harbours.geojson"
+    drawn = box(9.9, 53.5, 9.98, 53.58)
+    app.save_harbour_outline([str(outline)], str(outline), "DE-abcd1234",
+                             to_wkt(drawn), None, mapping(drawn))
+
+    at = _app_on(outputs)
+    at = at.toggle(key="outline_mode_DE-abcd1234").set_value(True).run()
+
+    assert not at.exception
+    # The toggle's own label doubles as the "this harbour was edited" marker.
+    assert "manually adjusted" in at.toggle(key="outline_mode_DE-abcd1234").label

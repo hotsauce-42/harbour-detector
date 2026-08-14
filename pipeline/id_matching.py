@@ -27,12 +27,16 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 from shapely.geometry import mapping
+from shapely.wkt import dumps as to_wkt
 from shapely.wkt import loads as from_wkt
 
-from utils.geo import haversine_meters
+from utils.geo import haversine_meters, merge_outlines
 from utils.overrides import (
+    DETECTED_OUTLINE_KEY,
     EDITABLE_FIELDS,
+    MANUAL_OUTLINE_KEY,
     OVERRIDES_KEY,
+    manual_outline,
     normalise_overrides,
     override_values,
 )
@@ -66,10 +70,15 @@ OUTPUT_SCHEMA = pa.schema([
     pa.field("nearest_city_dist_km",   pa.float32()),
     pa.field("admin1",                 pa.string()),
     pa.field("geometry_wkt",           pa.string()),  # exact H3-cell union
-    pa.field("outline_wkt",            pa.string()),  # closed harbour outline
+    pa.field("outline_wkt",            pa.string()),  # effective outline (see below)
     pa.field("matched_existing",       pa.bool_()),  # True = reused existing harbour_id
     # Fields carried over from a GUI correction instead of being re-geocoded
     pa.field("manual_overrides",       pa.list_(pa.string())),
+    # Outline drawn in the GUI, verbatim; null for a harbour nobody edited.
+    pa.field("manual_outline_wkt",     pa.string()),
+    # Phase 4's outline before the manual one was merged in. outline_wkt is the
+    # union of the two, so this is what a GUI revert falls back to.
+    pa.field("detected_outline_wkt",   pa.string()),
 ])
 
 
@@ -80,6 +89,10 @@ class Phase5Config:
     existing_db_path: Optional[str] = None
     h3_jaccard_threshold: float = 0.3
     centroid_match_distance_meters: float = 500.0
+    # Mirrors phase4.outline_fill_holes so merging a manual outline treats voids
+    # the same way the detected outline did — otherwise this phase would quietly
+    # fill holes that Phase 4 was configured to keep.
+    outline_fill_holes: bool = True
     s3_cfg: dict = field(default_factory=dict)
 
     @classmethod
@@ -94,6 +107,7 @@ class Phase5Config:
             centroid_match_distance_meters=p5.get(
                 "centroid_match_distance_meters", 500.0
             ),
+            outline_fill_holes=cfg.get("phase4", {}).get("outline_fill_holes", True),
             s3_cfg=build_s3_config(cfg.get("s3", {})),
         )
 
@@ -190,16 +204,18 @@ def _geojson_to_df(fc: dict) -> pd.DataFrame:
 
 def _build_indexes(
     existing: pd.DataFrame,
-) -> tuple[dict[str, str], list[dict], dict[str, dict]]:
+) -> tuple[dict[str, str], list[dict], dict[str, dict], dict[str, str]]:
     """
     Returns:
-      cell_index     : h3_cell → harbour_id  (for Jaccard matching)
-      centroid_list  : list of {harbour_id, centroid_lat, centroid_lon, h3_cells}
-      overrides_by_id: harbour_id → {field: manually corrected value}
+      cell_index      : h3_cell → harbour_id  (for Jaccard matching)
+      centroid_list   : list of {harbour_id, centroid_lat, centroid_lon, h3_cells}
+      overrides_by_id : harbour_id → {field: manually corrected value}
+      outlines_by_id  : harbour_id → manually drawn outline WKT
     """
     cell_index: dict[str, str] = {}
     centroid_list: list[dict] = []
     overrides_by_id: dict[str, dict] = {}
+    outlines_by_id: dict[str, str] = {}
 
     has_cells = "h3_cells" in existing.columns
 
@@ -210,6 +226,10 @@ def _build_indexes(
         corrected = override_values(row)
         if corrected:
             overrides_by_id[hid] = corrected
+
+        drawn = manual_outline(row)
+        if drawn:
+            outlines_by_id[hid] = drawn
 
         if has_cells and isinstance(row["h3_cells"], (list, tuple)):
             cells = list(row["h3_cells"])
@@ -231,8 +251,11 @@ def _build_indexes(
     if overrides_by_id:
         logger.info("Existing DB carries manual overrides for %d harbours",
                     len(overrides_by_id))
+    if outlines_by_id:
+        logger.info("Existing DB carries manually drawn outlines for %d harbours",
+                    len(outlines_by_id))
 
-    return cell_index, centroid_list, overrides_by_id
+    return cell_index, centroid_list, overrides_by_id, outlines_by_id
 
 
 # ---------------------------------------------------------------------------
@@ -301,6 +324,7 @@ def _assign_ids(
     centroid_list: list[dict],
     config: Phase5Config,
     overrides_by_id: Optional[dict[str, dict]] = None,
+    outlines_by_id: Optional[dict[str, str]] = None,
 ) -> pd.DataFrame:
     """
     Assign a harbour_id to every cluster and re-apply manual corrections.
@@ -308,12 +332,18 @@ def _assign_ids(
     When a cluster matches an existing harbour whose record marks fields as
     manually overridden, those fields replace the values Phase 4 geocoded. Every
     other field — and every unmatched harbour — keeps the fresh Phase 4 value.
+
+    A manually drawn outline is attached here but merged later, in
+    `_apply_manual_outlines`: matching itself always runs against the freshly
+    detected geometry.
     """
     overrides_by_id = overrides_by_id or {}
+    outlines_by_id  = outlines_by_id or {}
 
-    harbour_ids    = []
-    matched_flags  = []
-    override_lists = []
+    harbour_ids     = []
+    matched_flags   = []
+    override_lists  = []
+    manual_outlines: list[Optional[str]] = []
     # column → {row position → corrected value}, applied after the loop so the
     # matching itself always runs against the freshly geocoded data.
     patches: dict[str, dict[int, object]] = {}
@@ -333,6 +363,7 @@ def _assign_ids(
         if existing_id:
             harbour_ids.append(existing_id)
             matched_flags.append(True)
+            manual_outlines.append(outlines_by_id.get(existing_id))
             n_matched += 1
 
             corrected = overrides_by_id.get(existing_id, {})
@@ -348,6 +379,7 @@ def _assign_ids(
             )
             matched_flags.append(False)
             override_lists.append([])
+            manual_outlines.append(None)
             n_new += 1
 
     logger.info(
@@ -369,10 +401,77 @@ def _assign_ids(
             series.iat[pos] = value
         enriched[column] = series
 
-    enriched["harbour_id"]       = harbour_ids
-    enriched["matched_existing"] = matched_flags
-    enriched[OVERRIDES_KEY]      = override_lists
+    enriched["harbour_id"]        = harbour_ids
+    enriched["matched_existing"]  = matched_flags
+    enriched[OVERRIDES_KEY]       = override_lists
+    enriched[MANUAL_OUTLINE_KEY]  = manual_outlines
     return enriched
+
+
+def _apply_manual_outlines(
+    df: pd.DataFrame,
+    fill_holes: bool = True,
+) -> pd.DataFrame:
+    """
+    Union each harbour's manually drawn outline into its detected one.
+
+    The drawn outline is a floor, not a replacement: `outline_wkt` becomes
+    `detected ∪ manual`, so new stop events can still push the boundary
+    outwards, while a re-run can never pull it back inside what the operator
+    drew. `detected_outline_wkt` keeps Phase 4's shape so the GUI can show what
+    was actually detected and revert an edit.
+
+    The stored `manual_outline_wkt` is never rewritten — it stays the frozen
+    baseline the operator drew, however far the harbour grows around it.
+    Unparseable geometry is logged and skipped rather than failing the phase:
+    one bad polygon in the existing DB must not cost a whole run.
+    """
+    df = df.copy()
+    df[DETECTED_OUTLINE_KEY] = df["outline_wkt"]
+
+    if MANUAL_OUTLINE_KEY not in df.columns:
+        return df
+
+    merged_wkts: list[Optional[str]] = []
+    n_applied = 0
+    n_skipped = 0
+
+    for _, row in df.iterrows():
+        detected_wkt = row["outline_wkt"] if pd.notna(row["outline_wkt"]) else None
+        drawn_wkt    = manual_outline(row)
+
+        if not drawn_wkt:
+            merged_wkts.append(detected_wkt)
+            continue
+
+        try:
+            drawn    = from_wkt(drawn_wkt)
+            detected = from_wkt(detected_wkt) if detected_wkt else None
+            merged   = merge_outlines(detected, drawn, fill_holes=fill_holes)
+        except Exception as exc:
+            logger.warning("Harbour %s: could not merge its manual outline (%s) — "
+                           "keeping the detected one", row["harbour_id"], exc)
+            merged_wkts.append(detected_wkt)
+            n_skipped += 1
+            continue
+
+        if merged is None:
+            logger.warning("Harbour %s: manual outline encloses no area — "
+                           "keeping the detected one", row["harbour_id"])
+            merged_wkts.append(detected_wkt)
+            n_skipped += 1
+            continue
+
+        merged_wkts.append(to_wkt(merged))
+        n_applied += 1
+
+    df["outline_wkt"] = merged_wkts
+
+    if n_applied:
+        logger.info("Merged manually drawn outlines into %d harbours", n_applied)
+    if n_skipped:
+        logger.warning("  %d manual outlines were unusable and ignored", n_skipped)
+    return df
 
 
 # ---------------------------------------------------------------------------
@@ -391,6 +490,16 @@ def _write_parquet(df: pd.DataFrame, out_dir: str, s3_cfg: dict) -> str:
     overrides_array = pa.array(
         [normalise_overrides(v) for v in stored_overrides],
         type=pa.list_(pa.string()),
+    )
+    # Nullable: only harbours edited in the GUI carry a drawn outline. Written
+    # through manual_outline() so a blank string lands as null, not as "".
+    manual_outline_array = pa.array(
+        [manual_outline(row) for _, row in df.iterrows()], type=pa.string()
+    )
+    detected_outline_array = pa.array(
+        df[DETECTED_OUTLINE_KEY] if DETECTED_OUTLINE_KEY in df.columns
+        else df["outline_wkt"],
+        type=pa.string(),
     )
 
     table = pa.table(
@@ -413,6 +522,8 @@ def _write_parquet(df: pd.DataFrame, out_dir: str, s3_cfg: dict) -> str:
             "outline_wkt":       pa.array(df["outline_wkt"],       type=pa.string()),
             "matched_existing":  pa.array(df["matched_existing"],  type=pa.bool_()),
             "manual_overrides":  overrides_array,
+            "manual_outline_wkt":   manual_outline_array,
+            "detected_outline_wkt": detected_outline_array,
         },
         schema=OUTPUT_SCHEMA,
     )
@@ -424,6 +535,14 @@ def _write_parquet(df: pd.DataFrame, out_dir: str, s3_cfg: dict) -> str:
         pq.write_table(table, out_path, compression="snappy")
     logger.info("Wrote harbours.parquet → %s", out_path)
     return out_path
+
+
+def _optional_wkt(value) -> Optional[str]:
+    """A WKT string for JSON, or None — never a NaN, which is not valid JSON."""
+    if value is None or pd.isna(value):
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _write_geojson(
@@ -476,6 +595,10 @@ def _write_geojson(
                 "admin1":                 row["admin1"] or "",
                 "matched_existing":       bool(row["matched_existing"]),
                 "manual_overrides":       normalise_overrides(row.get(OVERRIDES_KEY)),
+                # Both outline files carry these, so either one works as the
+                # existing DB the next run matches against.
+                MANUAL_OUTLINE_KEY:       manual_outline(row),
+                DETECTED_OUTLINE_KEY:     _optional_wkt(row.get(DETECTED_OUTLINE_KEY)),
             },
         }
         features.append(feature)
@@ -532,21 +655,25 @@ def run_phase5(config: Phase5Config) -> tuple[str, str, str]:
         enriched["outline_wkt"] = enriched["geometry_wkt"]
 
     # Load existing harbour DB (optional)
-    cell_index:      dict[str, str] = {}
-    centroid_list:   list[dict]     = []
+    cell_index:      dict[str, str]  = {}
+    centroid_list:   list[dict]      = []
     overrides_by_id: dict[str, dict] = {}
+    outlines_by_id:  dict[str, str]  = {}
 
     if config.existing_db_path:
         existing = _load_existing_db(config.existing_db_path, config.s3_cfg)
-        cell_index, centroid_list, overrides_by_id = _build_indexes(existing)
+        cell_index, centroid_list, overrides_by_id, outlines_by_id = _build_indexes(
+            existing
+        )
     else:
         logger.info(
             "No existing harbour DB supplied — all IDs will be newly generated."
         )
 
-    # Assign IDs
+    # Assign IDs, then merge in any outline an operator drew for a matched harbour
     result = _assign_ids(enriched, cell_index, centroid_list, config,
-                         overrides_by_id)
+                         overrides_by_id, outlines_by_id)
+    result = _apply_manual_outlines(result, fill_holes=config.outline_fill_holes)
 
     # Write outputs
     ensure_dir(config.output_dir)

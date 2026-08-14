@@ -46,6 +46,8 @@ Five-phase pipeline: stop extraction (Phase 1, **Spark** — `applyInPandas` per
 
 Phase 5 writes three files: `harbours.geojson` (closed harbour outline), `harbours_cells.geojson` (exact H3-cell union), `harbours.parquet` (both, as `outline_wkt` / `geometry_wkt`). The outline is a morphological closing — `utils/geo.outline_polygon()`.
 
+Manual outline edits: the GUI stores what an operator drew in `manual_outline_wkt` and Phase 4's shape in `detected_outline_wkt`; `outline_wkt` is the union of the two (`utils/geo.merge_outlines()`, applied in `id_matching._apply_manual_outlines`). The drawn outline is a **floor** — a re-run can grow a harbour but never shrink it inside the drawn shape, so an inward edit is undone by the next run. `manual_outline_wkt` is never rewritten by the pipeline; it stays the frozen baseline. Outline edits are geometry only — cells, counts, centroid and the Phase 5 matching all stay derived from detected data.
+
 All config lives in `config/settings.yaml`, baked into both Docker images. Any key is overridable at runtime via `SECTION__KEY` env vars — no rebuild needed.
 
 Two images, mirroring the Spark / non-Spark split:
@@ -93,11 +95,19 @@ Only Phase 1 uses Spark; Phases 2–5 are plain pandas/shapely/DuckDB. Phases co
 
 - To exercise Phase 1 without starting a JVM, call `_group_into_segments` / `_label_detection_method` / `_join_type5_data` directly — the same functions the Spark UDF runs, and much faster in tests.
 
-- `ruff check .` has ~65 pre-existing errors (mostly E501 in aligned `pa.table({...})` blocks). To prove you added none, compare counts across `git stash` / `git stash pop` — edits shift line numbers, so diffing the messages gives false positives.
+- `ruff check .` is clean — keep it that way; a single new E501 now stands out instead of hiding in a backlog.
 
 - `phase4.outline_simplify_meters` must stay `0`: it is the only step that can pull the outline inside a trafficked cell, and a 10 m tolerance bites up to ~50 m — a whole res-11 cell.
 
 - Streamlit `AppTest`: `st.segmented_control` is reached via `at.button_group`, and `set_value()` needs a **scalar** — a list is silently ignored, so the test passes while the widget never changed.
+
+- `AppTest` ignores a button's `disabled=True` and runs the click handler anyway (`Button` in the testing API exposes no `.disabled` to assert on either). Never let `disabled=` be the only thing standing between a stray click and a destructive write — guard inside the handler too. This is how the "Save outline" button was found silently clearing a stored outline when nothing was drawn.
+
+- After `unary_union`, do **not** assert `result.covers(input)`: GEOS shifts boundary coordinates by a few ULPs, and at harbour scale (~1e-6 deg²) that is enough to make the predicate False over a zero-area sliver. Assert `input.difference(result).area` is ~0 instead — that is the invariant `merge_outlines` actually guarantees.
+
+- Leaflet.Draw's edit toolbar only touches `L.Polygon` layers in the `FeatureGroup` handed to `Draw(feature_group=…)`. `folium.GeoJson` renders an `L.GeoJSON` group, whose contents the toolbar ignores — so the editable outline is rebuilt as `folium.Polygon` per part (`app._editable_polygons`). streamlit-folium then renames that group to `window.drawnItems` (a regex in its `_get_map_string`) and reports it back as `all_drawings`; if that rename ever stops matching, editing silently returns nothing.
+
+- pandas 3 stores a column of strings as `str` dtype, so a `None` you assign comes back as **NaN**, not None. Assert with `pd.isna(...)`, and treat "is it a string?" as the reliable null test for WKT columns (`utils.overrides.manual_outline`).
 
 - pyspark 4.0.0 bundles Hadoop **3.4.1** (`pyspark/jars/hadoop-client-*-3.4.1.jar`), but `Dockerfile.spark` downloads `hadoop-aws-3.3.4.jar` and comments that 3.3.4 is bundled. Verify this before trusting the Spark S3A path.
 

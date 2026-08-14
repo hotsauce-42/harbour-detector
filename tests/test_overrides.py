@@ -5,7 +5,9 @@ import pandas as pd
 
 from utils.overrides import (
     EDITABLE_FIELDS,
+    MANUAL_OUTLINE_KEY,
     OVERRIDES_KEY,
+    manual_outline,
     normalise_overrides,
     override_values,
     resolve_country_iso2,
@@ -112,3 +114,38 @@ def test_override_values_works_on_pandas_row():
 def test_override_values_empty_when_nothing_marked():
     row = {"nearest_city": "Hamburg", "admin1": "Hamburg"}
     assert override_values(row) == {}
+
+
+# ---------------------------------------------------------------------------
+# manual_outline — the drawn outline rides alongside, not inside, the field list
+# ---------------------------------------------------------------------------
+
+SQUARE_WKT = "POLYGON ((9.9 53.5, 9.91 53.5, 9.91 53.51, 9.9 53.51, 9.9 53.5))"
+
+
+def test_manual_outline_returns_stored_wkt():
+    assert manual_outline({MANUAL_OUTLINE_KEY: SQUARE_WKT}) == SQUARE_WKT
+
+
+def test_manual_outline_missing_for_an_unedited_harbour():
+    assert manual_outline({}) is None
+    assert manual_outline({MANUAL_OUTLINE_KEY: None}) is None
+    assert manual_outline({MANUAL_OUTLINE_KEY: float("nan")}) is None
+
+
+def test_manual_outline_treats_blank_as_absent():
+    """A cleared edit round-trips through GeoJSON as '', not as null."""
+    assert manual_outline({MANUAL_OUTLINE_KEY: ""}) is None
+    assert manual_outline({MANUAL_OUTLINE_KEY: "   "}) is None
+
+
+def test_manual_outline_works_on_pandas_row():
+    df = pd.DataFrame([{"harbour_id": "DE-abcd1234",
+                        MANUAL_OUTLINE_KEY: SQUARE_WKT}])
+    _, row = next(df.iterrows())
+    assert manual_outline(row) == SQUARE_WKT
+
+
+def test_manual_outline_is_not_a_text_override():
+    """It must never leak into manual_overrides, which stays text-field only."""
+    assert normalise_overrides([MANUAL_OUTLINE_KEY, "nearest_city"]) == ["nearest_city"]

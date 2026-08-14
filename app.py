@@ -23,12 +23,20 @@ import folium
 import pandas as pd
 import streamlit as st
 import yaml
-from shapely.geometry import shape
+from folium.plugins import Draw
+from shapely.geometry import MultiPolygon, mapping, shape
+from shapely.ops import unary_union
+from shapely.wkt import dumps as to_wkt
+from shapely.wkt import loads as from_wkt
 from streamlit_folium import st_folium
 
+from utils.geo import clean_polygon, merge_outlines
 from utils.overrides import (
+    DETECTED_OUTLINE_KEY,
     EDITABLE_FIELDS,
+    MANUAL_OUTLINE_KEY,
     OVERRIDES_KEY,
+    manual_outline,
     normalise_overrides,
     resolve_country_iso2,
 )
@@ -152,6 +160,32 @@ def plan_edits(
     return updates, overrides, note
 
 
+def _edit_harbour_in_file(path: str, harbour_id: str, mutate) -> bool:
+    """
+    Apply `mutate(feature)` to every feature for one harbour and rewrite the file.
+
+    Returns True when the file held the harbour and was rewritten, False when
+    the path is missing or the harbour is not in it.
+    """
+    if not path or not Path(path).exists():
+        return False
+
+    with open(path, encoding="utf-8") as f:
+        fc = json.load(f)
+
+    touched = False
+    for feat in fc.get("features", []):
+        props = feat.setdefault("properties", {})
+        if props.get("harbour_id") != harbour_id:
+            continue
+        mutate(feat)
+        touched = True
+
+    if touched:
+        _write_feature_collection(path, fc)
+    return touched
+
+
 def save_harbour_edits(
     paths: list[str],
     harbour_id: str,
@@ -167,27 +201,123 @@ def save_harbour_edits(
 
     Returns the paths actually rewritten.
     """
+    def mutate(feat: dict) -> None:
+        props = feat["properties"]
+        props.update(updates)
+        if overrides:
+            props[OVERRIDES_KEY] = overrides
+        else:
+            props.pop(OVERRIDES_KEY, None)
+
+    return [p for p in paths if _edit_harbour_in_file(p, harbour_id, mutate)]
+
+
+# ---------------------------------------------------------------------------
+# Manual outline edits
+# ---------------------------------------------------------------------------
+
+def detected_geometry(feat: dict):
+    """
+    The outline as the pipeline detected it, before any manual edit.
+
+    Phase 5 stores it in `detected_outline_wkt`. Output written before this
+    feature existed has no such property — there the feature geometry is still
+    the detected outline, because nothing had been drawn over it yet.
+
+    Returns a shapely geometry, or None when the feature has no geometry at all.
+    """
+    props = feat.get("properties", {})
+    stored = props.get(DETECTED_OUTLINE_KEY)
+    if isinstance(stored, str) and stored.strip():
+        try:
+            return from_wkt(stored)
+        except Exception:
+            pass
+
+    geom = feat.get("geometry")
+    if not geom:
+        return None
+    try:
+        return shape(geom)
+    except Exception:
+        return None
+
+
+def drawn_geometry(feat: dict):
+    """The operator's stored outline for this harbour, or None."""
+    wkt = manual_outline(feat.get("properties", {}))
+    if not wkt:
+        return None
+    try:
+        return from_wkt(wkt)
+    except Exception:
+        return None
+
+
+def outline_from_drawings(drawings) -> str | None:
+    """
+    Fold everything currently on the draw layer into one outline, as WKT.
+
+    The layer holds whatever the operator left there — the seeded outline parts
+    with their vertices dragged around, a freshly drawn replacement, or both —
+    so the union of all of it is the new outline. Non-areal leftovers and the
+    self-intersections a dragged vertex produces are cleaned up.
+
+    Returns None when nothing areal is left, which is how "I deleted everything"
+    arrives here.
+    """
+    geoms = []
+    for drawing in drawings or []:
+        geom = drawing.get("geometry") if isinstance(drawing, dict) else None
+        if not geom:
+            continue
+        try:
+            geoms.append(shape(geom))
+        except Exception:
+            continue
+
+    if not geoms:
+        return None
+
+    merged = clean_polygon(unary_union(geoms))
+    return to_wkt(merged) if merged is not None else None
+
+
+def save_harbour_outline(
+    paths: list[str],
+    outline_path: str,
+    harbour_id: str,
+    drawn_wkt: str | None,
+    detected_wkt: str | None,
+    effective_geometry: dict | None,
+) -> list[str]:
+    """
+    Persist a manually drawn outline for one harbour.
+
+    Every file gets the properties — `manual_outline_wkt` is what Phase 5 reads
+    back off the existing database, and it has to be there whichever file is
+    pointed at. Only `outline_path` gets new geometry: the H3-cell file holds
+    the cell union, which a manual outline does not touch.
+
+    Passing `drawn_wkt=None` clears the edit and restores the detected outline.
+    """
+    def mutate(feat: dict) -> None:
+        props = feat["properties"]
+        if drawn_wkt:
+            props[MANUAL_OUTLINE_KEY] = drawn_wkt
+        else:
+            props.pop(MANUAL_OUTLINE_KEY, None)
+        if detected_wkt:
+            props[DETECTED_OUTLINE_KEY] = detected_wkt
+
     written = []
     for path in paths:
-        if not path or not Path(path).exists():
-            continue
-        with open(path, encoding="utf-8") as f:
-            fc = json.load(f)
+        def mutate_file(feat: dict, path=path) -> None:
+            mutate(feat)
+            if path == outline_path and effective_geometry is not None:
+                feat["geometry"] = effective_geometry
 
-        touched = False
-        for feat in fc.get("features", []):
-            props = feat.setdefault("properties", {})
-            if props.get("harbour_id") != harbour_id:
-                continue
-            props.update(updates)
-            if overrides:
-                props[OVERRIDES_KEY] = overrides
-            else:
-                props.pop(OVERRIDES_KEY, None)
-            touched = True
-
-        if touched:
-            _write_feature_collection(path, fc)
+        if _edit_harbour_in_file(path, harbour_id, mutate_file):
             written.append(path)
     return written
 
@@ -245,6 +375,57 @@ SHOW_CELLS   = "H3 cells"
 SHOW_BOTH    = "Both"
 
 
+def _editable_polygons(geom, style: dict) -> list[folium.Polygon]:
+    """
+    Rebuild an outline as plain Leaflet polygons, ready for the draw control.
+
+    Leaflet.Draw edits `L.Polygon` layers; `folium.GeoJson` renders an
+    `L.GeoJSON` group, whose parts the edit toolbar will not touch. One Polygon
+    per part — holes included — keeps a multi-part outline editable as well.
+    """
+    if geom is None or geom.is_empty:
+        return []
+
+    parts = list(geom.geoms) if isinstance(geom, MultiPolygon) else [geom]
+    polygons = []
+    for part in parts:
+        # folium takes (lat, lon); GeoJSON and shapely store (lon, lat).
+        rings = [[(lat, lon) for lon, lat in ring.coords]
+                 for ring in [part.exterior, *part.interiors]]
+        polygons.append(folium.Polygon(
+            locations=rings,
+            color=style["color"],
+            weight=style["weight"],
+            fill=True,
+            fill_color=style["fillColor"],
+            fill_opacity=style["fillOpacity"],
+        ))
+    return polygons
+
+
+def _add_draw_control(m: folium.Map, geom, label: str) -> None:
+    """Put the outline on an editable layer and wire the draw toolbar to it."""
+    group = folium.FeatureGroup(name=label)
+    for polygon in _editable_polygons(geom, OUTLINE_STYLE):
+        polygon.add_to(group)
+    group.add_to(m)
+
+    # feature_group= makes this group the draw control's own layer, so the
+    # outline is editable in place and comes back in st_folium's all_drawings.
+    Draw(
+        feature_group=group,
+        export=False,
+        position="topleft",
+        show_geometry_on_click=False,
+        draw_options={
+            "polyline": False, "circle": False, "circlemarker": False,
+            "marker": False, "rectangle": False,
+            "polygon": {"allowIntersection": False, "showArea": True},
+        },
+        edit_options={"edit": {}, "remove": True},
+    ).add_to(m)
+
+
 def _build_map(
     feat: dict,
     tile_url: str,
@@ -252,6 +433,7 @@ def _build_map(
     tile_name: str,
     cells_geom: dict | None = None,
     show: str = SHOW_OUTLINE,
+    editable: bool = False,
 ) -> folium.Map:
     props        = feat.get("properties", {})
     outline_geom = feat.get("geometry")
@@ -276,9 +458,10 @@ def _build_map(
     Draught changes: {props.get('n_draught_changes', 0)}
     """
 
-    # Outline first so the finer cells stay legible on top of it.
+    # Outline first so the finer cells stay legible on top of it. While editing
+    # it is drawn by the draw control instead, so it is not added twice.
     layers = []
-    if show in (SHOW_OUTLINE, SHOW_BOTH) and outline_geom:
+    if show in (SHOW_OUTLINE, SHOW_BOTH) and outline_geom and not editable:
         layers.append((outline_geom, OUTLINE_STYLE, f"{city} — outline"))
     if show in (SHOW_CELLS, SHOW_BOTH) and cells_geom:
         layers.append((cells_geom, CELLS_STYLE, f"{city} — H3 cells"))
@@ -294,10 +477,16 @@ def _build_map(
         folium.Popup(popup_html, max_width=260).add_to(gj)
         gj.add_to(m)
 
+    if editable and outline_geom:
+        _add_draw_control(m, shape(outline_geom), f"{city} — outline (editing)")
+
     # Fit the view to everything drawn (the outline already covers the cells).
-    if layers:
+    bounds_source = outline_geom if (outline_geom and show != SHOW_CELLS) else None
+    if bounds_source is None and layers:
+        bounds_source = layers[0][0]
+    if bounds_source:
         try:
-            bounds = shape(layers[0][0]).bounds  # (minlon, minlat, maxlon, maxlat)
+            bounds = shape(bounds_source).bounds  # (minlon, minlat, maxlon, maxlat)
             m.fit_bounds([[bounds[1], bounds[0]], [bounds[3], bounds[2]]])
         except Exception:
             pass
@@ -370,6 +559,102 @@ def _edit_panel(feat: dict, paths: list[str], existing_db: str = "") -> None:
             _after_save(hid, None,
                         "Cleared manual flags — the next pipeline run will "
                         f"re-derive these fields ({len(written)} file(s) updated).")
+
+
+def outline_edit_note(detected, drawn) -> str | None:
+    """
+    Flag the parts of an outline edit that will not do what it looks like.
+
+    Trimming is the important one: the drawn outline is a floor, so an inward
+    edit lasts only until the next pipeline run unions the detected area back
+    in. Better to say so at save time than to let it silently reappear.
+    """
+    if detected is None or detected.is_empty or drawn is None:
+        return None
+
+    notes = []
+    trimmed = detected.difference(drawn).area
+    if trimmed > detected.area * 1e-6:
+        notes.append(
+            f"About {trimmed / detected.area:.0%} of the detected outline was "
+            "trimmed away. The manual outline is a floor, not a replacement — "
+            "the next pipeline run unions the detected area back in."
+        )
+    if drawn.area > detected.area * 10:
+        notes.append(
+            "The drawn outline is more than 10× the detected area — check that "
+            "it does not swallow a neighbouring harbour."
+        )
+    return " ".join(notes) or None
+
+
+def _outline_panel(
+    feat: dict,
+    paths: list[str],
+    outline_path: str,
+    map_state: dict | None,
+) -> None:
+    """Save / revert controls for the outline being edited on the map above."""
+    props    = feat.get("properties", {})
+    hid      = props.get("harbour_id", "")
+    detected = detected_geometry(feat)
+    stored   = manual_outline(props)
+
+    st.caption(
+        "Use the ✏️ tool to drag the outline's vertices (its midpoint handles "
+        "add new ones), or draw a replacement polygon with the ▱ tool and "
+        "delete the old one. Everything left on the map is saved as one "
+        "outline — it is stored as a floor, so later runs can grow the harbour "
+        "but never shrink it back inside what you drew."
+    )
+
+    drawings  = (map_state or {}).get("all_drawings")
+    drawn_wkt = outline_from_drawings(drawings)
+
+    save_col, revert_col = st.columns([1, 1])
+    save = save_col.button(
+        "Save outline", type="primary", key=f"save_outline_{hid}",
+        disabled=not drawn_wkt,
+        help=None if drawn_wkt else "Draw or edit the outline on the map first.",
+    )
+    reverted = revert_col.button(
+        "Revert to detected", key=f"revert_outline_{hid}", disabled=not stored,
+        help="Drops the manual outline; the harbour falls back to the shape "
+             "the pipeline detected.",
+    )
+
+    if save and not drawn_wkt:
+        # The button is disabled in the browser, but never let a stray click
+        # through: saving nothing would quietly clear the stored outline, which
+        # is what "Revert to detected" is for.
+        st.info("Nothing drawn — the outline is unchanged.")
+        return
+
+    if save:
+        drawn  = from_wkt(drawn_wkt)
+        merged = merge_outlines(detected, drawn)
+        written = save_harbour_outline(
+            paths, outline_path, hid, drawn_wkt,
+            to_wkt(detected) if detected is not None else None,
+            mapping(merged) if merged is not None else None,
+        )
+        if not written:
+            st.error(f"Could not find harbour `{hid}` in any output file.")
+            return
+        _after_save(
+            hid, outline_edit_note(detected, drawn),
+            f"Saved outline to {', '.join(Path(p).name for p in written)}.",
+        )
+
+    if reverted:
+        written = save_harbour_outline(
+            paths, outline_path, hid, None,
+            to_wkt(detected) if detected is not None else None,
+            mapping(detected) if detected is not None else None,
+        )
+        _after_save(hid, None,
+                    "Reverted to the detected outline "
+                    f"({len(written)} file(s) updated).")
 
 
 def _after_save(harbour_id: str, note: str | None, message: str) -> None:
@@ -561,6 +846,16 @@ def main() -> None:
                 existing_db=cfg.get("phase5", {}).get("existing_db_path", ""))
 
     # ── Map ────────────────────────────────────────────────────────────────
+    hid = props.get("harbour_id", "")
+    edit_label = "Edit outline"
+    if manual_outline(props):
+        edit_label += "  •  manually adjusted"
+    editing = st.toggle(
+        edit_label, key=f"outline_mode_{hid}",
+        help="Turn on to drag the outline's vertices. The map then reports "
+             "every edit back to the app, so it redraws on each change.",
+    )
+
     fmap = _build_map(
         feat,
         tile_url=selected_tile["url"],
@@ -568,13 +863,19 @@ def main() -> None:
         tile_name=selected_tile["name"],
         cells_geom=cells_by_id.get(props.get("harbour_id")),
         show=show_geom,
+        editable=editing,
     )
-    st_folium(
+    # all_drawings is only worth the extra reruns while an edit is in progress.
+    map_state = st_folium(
         fmap,
         use_container_width=True,
         height=500,
-        returned_objects=[],
+        returned_objects=["all_drawings"] if editing else [],
+        key=f"map_{hid}_{'edit' if editing else 'view'}",
     )
+
+    if editing:
+        _outline_panel(feat, [output_file, cells_file], output_file, map_state)
 
     _map_legend(show_geom)
 

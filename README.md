@@ -33,7 +33,7 @@ When an existing harbour database is provided, Phase 5 tries to match each detec
 1. **H3 Jaccard overlap** — proportion of shared cells (primary, requires `h3_cells` in the existing DB)
 2. **Centroid distance** — fallback if the existing DB has no cell list
 
-If a match is found above the configured thresholds, the existing ID is reused — together with any city/region/country corrections the existing record marks as manually edited. See [Keeping manual edits across a re-run](#keeping-manual-edits-across-a-re-run).
+If a match is found above the configured thresholds, the existing ID is reused — together with any city/region/country corrections the existing record marks as manually edited, and any outline drawn for it in the GUI. See [Keeping manual edits across a re-run](#keeping-manual-edits-across-a-re-run) and [Adjusting a harbour's outline](#adjusting-a-harbours-outline).
 
 ---
 
@@ -129,7 +129,9 @@ Adjust these if your Parquet files use different column names.
 |-----|---------|-------------|
 | `h3_jaccard_threshold` | `0.3` | Minimum H3 cell overlap ratio to match an existing harbour |
 | `centroid_match_distance_meters` | `500` | Fallback: centroid distance threshold for a match |
-| `existing_db_path` | `data/existing_db/harbours.geojson` | Existing harbour database to match against (`.geojson` or `.parquet`, local or `s3://`). Also the file manual GUI corrections are read back from — see [Keeping manual edits across a re-run](#keeping-manual-edits-across-a-re-run). Overridable per run with `--existing-db`. |
+| `existing_db_path` | `data/existing_db/harbours.geojson` | Existing harbour database to match against (`.geojson` or `.parquet`, local or `s3://`). Also the file manual GUI corrections and drawn outlines are read back from — see [Keeping manual edits across a re-run](#keeping-manual-edits-across-a-re-run). Overridable per run with `--existing-db`. |
+
+Phase 5 also reads `phase4.outline_fill_holes`, so merging a drawn outline treats interior voids the way the detected outline was built.
 
 ### `spark` — Spark session
 
@@ -378,6 +380,29 @@ Phase 5 reads `manual_overrides` back off the existing harbour database. When a 
 Matching itself always runs against the fresh data, so an override can never change *which* harbour a cluster matches — only the metadata it ends up with.
 
 > **The edits must reach the database Phase 5 actually reads.** The GUI writes to `gui.output_file`, but Phase 5 matches against `phase5.existing_db_path`. When those are different files, copy the output across before the next run, or point `existing_db_path` at the output file. The app shows a warning whenever the two paths differ.
+
+### Adjusting a harbour's outline
+
+The detected outline is a morphological closing of the cells that saw traffic, so it can miss a quay that had no stop events in the window, or bulge into open water. Turn on **Edit outline** above the map to fix it by hand:
+
+- The ✏️ tool makes the outline's vertices draggable; its midpoint handles add new ones.
+- The ▱ tool draws a replacement polygon — useful when the detected shape is badly wrong. Delete the old one with 🗑 and everything left on the map is saved as one outline (so a multi-part harbour keeps its parts).
+- **Save outline** writes it; **Revert to detected** drops it again.
+
+Saving records three things:
+
+```json
+"manual_outline_wkt":   "POLYGON ((9.93 53.54, …))",   // exactly what you drew
+"detected_outline_wkt": "POLYGON ((9.94 53.54, …))",   // what Phase 4 detected
+```
+
+and the feature geometry becomes the union of the two. Both GeoJSON files carry the properties; only `harbours.geojson` gets the new geometry, since `harbours_cells.geojson` holds the H3-cell union, which drawing an outline does not change.
+
+**The drawn outline is a floor, not a replacement.** On the next run Phase 5 sets `outline_wkt = detected ∪ manual`, so a harbour can still grow as new stop events light up cells outside your shape, but can never shrink back inside it. The flip side: dragging the boundary *inwards* lasts only until the next run unions the detected area back in — the app warns you at save time when an edit trims detected area away.
+
+`manual_outline_wkt` is never rewritten by the pipeline. It stays the baseline you drew however far the harbour grows around it, which is what makes **Revert to detected** exact and keeps "what a human drew" separable from "what the pipeline added".
+
+An outline edit is geometry only: `h3_cells`, `n_events`, `n_unique_mmsi` and the centroid keep describing the detected data, and matching still runs on cells and centroid — so drawing a bigger outline never changes which cluster matches which harbour.
 
 ### Testing the GUI without pipeline data
 

@@ -11,6 +11,13 @@ over in place of the freshly geocoded values, so a manual correction survives
 the next pipeline run. Fields that were never edited still refresh normally.
 
 The harbour_id is never editable — it is what the match is keyed on.
+
+The manually adjusted outline is tracked separately, in ``manual_outline_wkt``.
+It is not a text field, and it is merged rather than substituted: Phase 5 unions
+it with the freshly detected outline, so a harbour can grow but never shrink
+below what the operator drew. ``manual_overrides`` therefore stays a list of
+*text* fields, and the outline's marker is simply that ``manual_outline_wkt``
+holds something.
 """
 
 from typing import Any, Mapping, Optional
@@ -31,6 +38,14 @@ DEPENDENT_FIELDS: dict[str, tuple[str, ...]] = {
 }
 
 OVERRIDES_KEY = "manual_overrides"
+
+# The outline an operator drew, verbatim, as WKT in WGS84 degrees. Frozen: the
+# pipeline reads it and unions it into outline_wkt, but never writes it back.
+MANUAL_OUTLINE_KEY = "manual_outline_wkt"
+
+# Phase 4's outline, kept alongside the merged one so the GUI can show what was
+# actually detected and revert a manual edit without waiting for a re-run.
+DETECTED_OUTLINE_KEY = "detected_outline_wkt"
 
 
 def _is_missing(value: Any) -> bool:
@@ -84,6 +99,25 @@ def resolve_country_iso2(country_name: str) -> Optional[str]:
             return None
         country = matches[0] if matches else None
     return getattr(country, "alpha_2", None)
+
+
+def manual_outline(row: Mapping[str, Any]) -> Optional[str]:
+    """
+    The manually drawn outline stored on an existing-harbour record, as WKT.
+
+    Returns None when the record has no manual outline — including the empty
+    strings and NaNs that a Parquet or GeoJSON round-trip leaves behind for a
+    harbour nobody edited. The WKT itself is not parsed here: this module stays
+    free of a geometry dependency, and the caller has to handle unparseable
+    geometry anyway.
+    """
+    value = row.get(MANUAL_OUTLINE_KEY)
+    # A stored outline is always a string. Anything else is a null in one of the
+    # shapes a round-trip produces — None, NaN, or the pd.NA of an Arrow-backed
+    # string column, whose str() would otherwise be taken for WKT.
+    if _is_missing(value) or not isinstance(value, str):
+        return None
+    return value.strip() or None
 
 
 def override_values(row: Mapping[str, Any]) -> dict[str, Any]:

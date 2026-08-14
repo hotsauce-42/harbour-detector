@@ -1,6 +1,7 @@
 import numpy as np
-from shapely.geometry import MultiPolygon, Polygon
+from shapely.geometry import GeometryCollection, MultiPolygon, Polygon
 from shapely.ops import transform, unary_union
+from shapely.validation import make_valid
 
 # Meters per degree of latitude; also per degree of longitude at the equator.
 METERS_PER_DEGREE = 111_320.0
@@ -110,3 +111,75 @@ def outline_polygon(
     if metric.is_empty:
         return geom
     return transform(to_degrees, metric)
+
+
+def _polygonal_parts(geom) -> list:
+    """Flatten a geometry to its polygon parts, dropping points and lines."""
+    if geom is None or geom.is_empty:
+        return []
+    if isinstance(geom, Polygon):
+        return [geom]
+    if isinstance(geom, (MultiPolygon, GeometryCollection)):
+        parts: list = []
+        for part in geom.geoms:
+            parts.extend(_polygonal_parts(part))
+        return parts
+    return []
+
+
+def clean_polygon(geom):
+    """
+    Repair a polygonal geometry, discarding everything that encloses no area.
+
+    An outline dragged around in the GUI can come back self-intersecting, which
+    `make_valid` resolves into areas plus — for a bow-tie — the odd dangling
+    line. Only the areas describe a harbour, so the rest is dropped.
+
+    Returns a valid Polygon or MultiPolygon, or None when nothing polygonal is
+    left (an empty, non-areal, or unrepairable input).
+    """
+    if geom is None or geom.is_empty:
+        return None
+    if not geom.is_valid:
+        geom = make_valid(geom)
+
+    parts = _polygonal_parts(geom)
+    if not parts:
+        return None
+
+    merged = unary_union(parts)
+    return None if merged.is_empty else merged
+
+
+def merge_outlines(detected, manual, fill_holes: bool = True):
+    """
+    Merge a freshly detected harbour outline with a manually drawn one.
+
+    The manual outline is a floor, never a replacement: the result contains
+    both inputs, so a later pipeline run can extend a harbour — as new stop
+    events light up cells outside the drawn shape — but can never pull its
+    boundary back inside what an operator drew. Dragging the outline inwards
+    therefore does not survive a re-run: the detected area is unioned back in.
+
+    Both inputs are repaired first, so an invalid manual polygon degrades to
+    whatever area it does enclose instead of poisoning the union. `fill_holes`
+    matches `outline_polygon`: two crescent-shaped parts can union into a ring,
+    and an outline is not meant to have voids.
+
+    The result gives up none of either input's *area*, but do not assert
+    `result.covers(input)`: GEOS shifts boundary coordinates by a few ULPs when
+    it unions, which at harbour scale is enough for the topological predicate to
+    report False over a zero-area sliver. Compare `input.difference(result).area`
+    instead.
+
+    Returns None when neither input encloses any area.
+    """
+    parts = [g for g in (clean_polygon(detected), clean_polygon(manual))
+             if g is not None]
+    if not parts:
+        return None
+
+    merged = parts[0] if len(parts) == 1 else unary_union(parts)
+    if fill_holes:
+        merged = _drop_interior_rings(merged)
+    return merged
