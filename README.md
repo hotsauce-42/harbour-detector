@@ -337,7 +337,7 @@ s3:
 | `EndpointResolutionError` / connection refused | Wrong endpoint or MinIO not running | Check `endpoint_url` — must not have a trailing slash |
 | `403 Forbidden` | Bucket policy or wrong credentials | Verify key/secret and that the bucket allows the operation |
 | `NoSuchKey` when reading interim files | Previous phase not run yet | Run phases in order (phase1 → phase2 → … → phase5) |
-| DuckDB `IO Error: Unable to connect` | httpfs extension not installed | Run `pip install duckdb --upgrade`; ensure outbound HTTPS is allowed |
+| DuckDB `IO Error: Unable to connect` (Phase 1 only) | httpfs extension not installed | Run `pip install duckdb --upgrade`; ensure outbound HTTPS is allowed |
 
 ---
 
@@ -423,7 +423,7 @@ There are two images, matching the two halves of the pipeline:
 | Dockerfile | Image | Phases | Default entrypoint | Contents |
 |---|---|---|---|---|
 | `Dockerfile.spark` | `harbour-detector-spark` | 1 (and 1–5 if you want one pod) | `run_phase1.py` | JVM + PySpark + S3A JARs + full pipeline code |
-| `Dockerfile.enrich` | `harbour-detector-enrich` | 2–5 | `run_enrich.py` | pandas / shapely / DuckDB only — no JVM, no PySpark, no OS packages |
+| `Dockerfile.enrich` | `harbour-detector-enrich` | 2–5 | `run_enrich.py` | pandas / pyarrow / shapely only — no JVM, no PySpark, no DuckDB, no OS packages |
 
 Both images include:
 - Their default configuration (`config/settings.yaml`), overridable at runtime via environment variables
@@ -436,8 +436,10 @@ Dependencies are split to match:
 | File | Contents |
 |---|---|
 | `requirements-base.txt` | Shared runtime deps — installed by the enrichment image |
-| `requirements-spark.txt` | `requirements-base.txt` + `pyspark` — installed by the Spark image |
-| `requirements.txt` | `requirements-spark.txt` + Streamlit GUI + dev tooling — local development |
+| `requirements-spark.txt` | `requirements-base.txt` + `pyspark` + `duckdb` (both Phase 1 only) — installed by the Spark image |
+| `requirements.txt` | `requirements-spark.txt` + Streamlit GUI + `pytest` / `ruff` / `mypy` — local development and CI |
+
+The shared runtime deps are **pinned exactly**. The two images are built separately and hand data over as Parquet, so a version floor would let them resolve different majors at their own build times — a Phase 1 image on pandas 2 feeding a Phase 2–5 image on pandas 3 disagrees about datetime resolution with no obvious symptom. Bump the pin, rebuild **both** images from the same commit, run `pytest`.
 
 ### Build
 
@@ -500,7 +502,7 @@ The enrichment image covers phases 2–5; `run.py phase1` needs the Spark image 
 Only Phase 1 uses Spark. The recommended production deployment **splits the pipeline into two steps** that hand off through S3:
 
 1. **Phase 1** runs on the **Spark Operator** (`deploy/spark_job.yaml`, entrypoint `run_phase1.py`), distributing stop extraction across executor pods.
-2. **Phases 2–5** run in a **plain pod** (`deploy/job_enrich.yaml`, entrypoint `run_enrich.py`) — pandas / shapely / DuckDB only, no Spark, no executors, so the pod is small.
+2. **Phases 2–5** run in a **plain pod** (`deploy/job_enrich.yaml`, entrypoint `run_enrich.py`) — pandas / pyarrow / shapely only, no Spark, no executors, so the pod is small.
 
 The two steps share no state beyond the S3 paths (`INTERIM_DIR` / `OUTPUT_DIR`), so an external orchestrator just has to run them in order. All intermediate data is written to S3, so failed pods can be retried without re-running earlier phases.
 

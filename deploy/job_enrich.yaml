@@ -2,7 +2,7 @@
 #
 # Runs H3 aggregation, cluster formation, enrichment, and ID matching/export
 # in a single plain pod. No Spark Operator, executors, or JVM workload — these
-# phases are pandas / shapely / DuckDB only, so the pod is small. It uses the
+# phases are pandas / pyarrow / shapely only, so the pod is small. It uses the
 # enrichment image (Dockerfile.enrich), which ships no JVM and no PySpark.
 #
 # Run this AFTER Phase 1 (deploy/spark_job.yaml) has completed. It reads the
@@ -92,7 +92,7 @@ spec:
                   name: harbour-detector-s3
                   key: region
 
-            # Phases 2-5 use s3fs / DuckDB httpfs. For MinIO or other
+            # Phases 2-5 reach S3 through s3fs (no DuckDB here). For MinIO or other
             # S3-compatible endpoints, supply the endpoint URL.
             # - name: S3_ENDPOINT_URL
             #   valueFrom:

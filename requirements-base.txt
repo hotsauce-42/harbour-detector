@@ -1,16 +1,23 @@
 # Runtime dependencies shared by every phase (1-5).
 # Installed on its own by Dockerfile.enrich (Phases 2-5, no Spark, no JVM).
-duckdb>=0.10.0
-pandas>=2.0.0
-pyarrow>=14.0.0
-numpy>=1.26.0
-pydantic>=2.0.0
-pyyaml>=6.0
+#
+# Pinned exactly, on purpose. The Spark image and the enrichment image are built
+# separately and hand data over as Parquet, so a floor like `pandas>=2.0.0`
+# lets them resolve different majors at their own build times — a Phase 1 image
+# on pandas 2 feeding a Phase 2-5 image on pandas 3 diverges on datetime
+# resolution (see the timestamp gotchas in CLAUDE.md) with no obvious symptom.
+#
+# To upgrade: bump here, rebuild BOTH images from the same commit, run `pytest`.
+pandas==3.0.2
+pyarrow==23.0.1
+numpy==2.4.4
+pydantic==2.13.2
+pyyaml==6.0.3
 # Phase 2+
-h3>=4.0.0
-shapely>=2.0.0           # geometry only — no geopandas/GDAL anywhere in the pipeline
-reverse_geocoder>=1.5.1
-pycountry>=22.0
+h3==4.4.2
+shapely==2.1.2           # geometry only — no geopandas/GDAL in the pipeline
+reverse_geocoder==1.5.1
+pycountry==26.2.16
 # S3 support
-s3fs>=2023.6.0
-python-dotenv>=1.0.0
+s3fs==2026.3.0
+python-dotenv==1.2.2

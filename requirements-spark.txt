@@ -1,6 +1,14 @@
-# Runtime dependencies for the Spark phase (Phase 1) — base plus PySpark.
-# Installed by Dockerfile.spark.
+# Runtime dependencies for the Spark phase (Phase 1) — base plus what only
+# Phase 1 needs. Installed by Dockerfile.spark.
+#
+# Pinned exactly for the same reason as requirements-base.txt: both images have
+# to agree on the libraries they exchange Parquet through.
 -r requirements-base.txt
 
 # Spark (Phase 1)
 pyspark==4.0.0
+
+# DuckDB reads the raw AIS Parquet in Phase 1 (pipeline/extract_stops.py).
+# Phases 2-5 never touch it — they go through pandas/pyarrow and s3fs — so it
+# stays out of the enrichment image.
+duckdb==1.5.2

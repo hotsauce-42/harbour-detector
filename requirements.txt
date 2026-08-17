@@ -1,6 +1,6 @@
 # Full local / dev install: every phase, the Streamlit GUI, and dev tooling.
 # The container images install the narrower files instead:
-#   Dockerfile.spark  -> requirements-spark.txt (base + pyspark + JVM)
+#   Dockerfile.spark  -> requirements-spark.txt (base + pyspark + duckdb + JVM)
 #   Dockerfile.enrich -> requirements-base.txt  (no Spark, no JVM)
 -r requirements-spark.txt
 
@@ -9,5 +9,9 @@ streamlit>=1.40.0        # st.segmented_control (map geometry toggle)
 streamlit-folium>=0.20.0
 folium>=0.16.0
 
-# Dev tooling (not needed at runtime — see the Dockerfiles)
+# Dev tooling (not needed at runtime — see the Dockerfiles).
+# pytest and ruff belong here so `pip install -r requirements.txt` gives a
+# working dev environment and CI can run the suite off this file alone.
+pytest>=8.0.0
+ruff>=0.6.0
 mypy>=1.11.0

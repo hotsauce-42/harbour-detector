@@ -54,7 +54,7 @@ Two images, mirroring the Spark / non-Spark split:
 - `Dockerfile.spark` → `harbour-detector-spark`: JVM + PySpark + S3A JARs, installs `requirements-spark.txt`. Default entrypoint `run_phase1.py`; carries the full code, so `run_pipeline.py` (all 5 phases, `deploy/job.yaml`) works too.
 - `Dockerfile.enrich` → `harbour-detector-enrich`: no JVM, no PySpark, installs `requirements-base.txt`. Default entrypoint `run_enrich.py`; `run.py phaseN` works for phases 2–5 only.
 
-Requirements split: `requirements-base.txt` (shared runtime) ← `requirements-spark.txt` (+ pyspark) ← `requirements.txt` (+ Streamlit GUI + dev tooling, local dev only).
+Requirements split: `requirements-base.txt` (shared runtime, **exact pins** so both images agree on the libraries they exchange Parquet through) ← `requirements-spark.txt` (+ pyspark + duckdb, both Phase 1 only) ← `requirements.txt` (+ Streamlit GUI + pytest/ruff/mypy, local dev and CI). Bumping a shared pin means rebuilding both images from the same commit.
 
 Entry points:
 - `run.py` — local CLI (run phases individually)
@@ -68,12 +68,12 @@ Entry points:
 
 Key utilities:
 - `utils/config.py` — shared config loader (YAML + env var overrides, dotenv)
-- `utils/s3.py` — credential resolution, DuckDB httpfs setup, s3fs filesystem factory, path helpers
+- `utils/s3.py` — credential resolution, DuckDB httpfs setup (Phase 1 only; takes a connection, so the module itself does not import duckdb), s3fs filesystem factory, path helpers
 - `utils/spark.py` — SparkSession factory with S3A / MinIO config; auto-detects local vs K8s mode
 
 Phase 1 split: `pipeline/extract_stops.py` holds the per-vessel pandas logic (reused as Spark UDF); `pipeline/extract_stops_spark.py` holds the Spark orchestration.
 
-Only Phase 1 uses Spark; Phases 2–5 are plain pandas/shapely/DuckDB. Phases communicate only through S3 (`interim_dir`/`output_dir`), so they can run in separate pods — `run_phase1.py` (Spark) then `run_enrich.py` (plain pod), ordered by an external orchestrator.
+Only Phase 1 uses Spark; Phases 2–5 are plain pandas/pyarrow/shapely. DuckDB is Phase 1 only (raw-AIS Parquet reads in `pipeline/extract_stops.py`) and ships only in the Spark image. Phases communicate only through S3 (`interim_dir`/`output_dir`), so they can run in separate pods — `run_phase1.py` (Spark) then `run_enrich.py` (plain pod), ordered by an external orchestrator.
 
 ## Gotchas
 
