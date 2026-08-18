@@ -54,7 +54,7 @@ Two images, mirroring the Spark / non-Spark split:
 - `Dockerfile.spark` → `harbour-detector-spark`: JVM + PySpark + S3A JARs, installs `requirements-spark.txt`. Default entrypoint `run_phase1.py`; carries the full code, so `run_pipeline.py` (all 5 phases, `deploy/job.yaml`) works too.
 - `Dockerfile.enrich` → `harbour-detector-enrich`: no JVM, no PySpark, installs `requirements-base.txt`. Default entrypoint `run_enrich.py`; `run.py phaseN` works for phases 2–5 only.
 
-Requirements split: `requirements-base.txt` (shared runtime, **exact pins** so both images agree on the libraries they exchange Parquet through) ← `requirements-spark.txt` (+ pyspark + duckdb, both Phase 1 only) ← `requirements.txt` (+ Streamlit GUI + pytest/ruff/mypy, local dev and CI). Bumping a shared pin means rebuilding both images from the same commit.
+Requirements split: `requirements-base.txt` (shared runtime, **exact pins** so both images agree on the libraries they exchange Parquet through) ← `requirements-spark.txt` (+ pyspark, Phase 1 only) ← `requirements.txt` (+ Streamlit GUI + pytest/ruff/mypy, local dev and CI). Bumping a shared pin means rebuilding both images from the same commit.
 
 Entry points:
 - `run.py` — local CLI (run phases individually)
@@ -68,12 +68,12 @@ Entry points:
 
 Key utilities:
 - `utils/config.py` — shared config loader (YAML + env var overrides, dotenv)
-- `utils/s3.py` — credential resolution, DuckDB httpfs setup (Phase 1 only; takes a connection, so the module itself does not import duckdb), s3fs filesystem factory, path helpers
+- `utils/s3.py` — credential resolution, s3fs filesystem factory, path helpers
 - `utils/spark.py` — SparkSession factory with S3A / MinIO config; auto-detects local vs K8s mode
 
-Phase 1 split: `pipeline/extract_stops.py` holds the per-vessel pandas logic (reused as Spark UDF); `pipeline/extract_stops_spark.py` holds the Spark orchestration.
+Phase 1 split: `pipeline/extract_stops.py` holds the per-vessel pandas logic (run as Spark UDF) and nothing else — no reading, no writing, so it imports no pyspark; `pipeline/extract_stops_spark.py` holds the Spark orchestration and is the only way to run Phase 1.
 
-Only Phase 1 uses Spark; Phases 2–5 are plain pandas/pyarrow/shapely. DuckDB is Phase 1 only (raw-AIS Parquet reads in `pipeline/extract_stops.py`) and ships only in the Spark image. Phases communicate only through S3 (`interim_dir`/`output_dir`), so they can run in separate pods — `run_phase1.py` (Spark) then `run_enrich.py` (plain pod), ordered by an external orchestrator.
+Only Phase 1 uses Spark; Phases 2–5 are plain pandas/pyarrow/shapely. Phases communicate only through S3 (`interim_dir`/`output_dir`), so they can run in separate pods — `run_phase1.py` (Spark) then `run_enrich.py` (plain pod), ordered by an external orchestrator.
 
 ## Gotchas
 
@@ -87,13 +87,13 @@ Only Phase 1 uses Spark; Phases 2–5 are plain pandas/pyarrow/shapely. DuckDB i
 
 - `reverse_geocoder` downloads its GeoNames dataset on first import. Both Dockerfiles pre-warm it during the build so the containers need no outbound internet at runtime.
 
-- MinIO requires `endpoint_url` without a trailing slash and `s3_url_style='path'`. `configure_duckdb_s3()` in `utils/s3.py` handles this automatically. For the Spark path (Phase 1), MinIO also needs `spark.hadoop.fs.s3a.path.style.access=true` — set in `deploy/spark_job.yaml` `sparkConf`.
+- MinIO requires `endpoint_url` without a trailing slash. For the Spark path (Phase 1), MinIO also needs `spark.hadoop.fs.s3a.path.style.access=true` — set in `deploy/spark_job.yaml` `sparkConf` and by `_apply_s3a_conf()` in `utils/spark.py` for local mode.
 
 - Raw AIS timestamps are stored as **integer seconds** (Unix epoch). Always use `pd.to_datetime(col, unit='s', utc=True)` when converting — omitting `unit='s'` silently produces wrong dates.
 
 - pandas 3 parses datetimes at **microsecond** resolution (pandas 2 used nanoseconds). When *writing* epoch seconds use `(ts - EPOCH) // pd.Timedelta(1, "s")` — `.astype("int64") // 1e9` silently yields 1970 dates. (The read side is the `unit='s'` gotcha above.)
 
-- To exercise Phase 1 without starting a JVM, call `_group_into_segments` / `_label_detection_method` / `_join_type5_data` directly — the same functions the Spark UDF runs, and much faster in tests.
+- To exercise Phase 1 without starting a JVM, call `_group_into_segments` / `_label_detection_method` / `_join_type5_data` directly — the same functions the Spark UDF runs, and much faster in tests. The end-to-end path (read → filter → UDF → write) needs a real session: `tests/test_phase1.py` has session-scoped `spark` / `spark_stops` fixtures that run the Spark job once over a fixture file (~35 s, `local[1]`).
 
 - `ruff check .` is clean — keep it that way; a single new E501 now stands out instead of hiding in a backlog.
 

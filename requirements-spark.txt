@@ -5,10 +5,7 @@
 # to agree on the libraries they exchange Parquet through.
 -r requirements-base.txt
 
-# Spark (Phase 1)
+# Spark reads the raw AIS Parquet and distributes stop detection per MMSI in
+# Phase 1 (pipeline/extract_stops_spark.py). Phases 2-5 never touch it — they
+# go through pandas/pyarrow and s3fs — so it stays out of the enrichment image.
 pyspark==4.0.0
-
-# DuckDB reads the raw AIS Parquet in Phase 1 (pipeline/extract_stops.py).
-# Phases 2-5 never touch it — they go through pandas/pyarrow and s3fs — so it
-# stays out of the enrichment image.
-duckdb==1.5.2

@@ -1,8 +1,8 @@
 # harbour-detector — enrichment image (Phases 2-5).
 #
 # H3 aggregation, cluster formation, enrichment and ID matching/export are
-# plain pandas / pyarrow / shapely code, so this image ships no JVM, no PySpark
-# and no DuckDB — it is a fraction of the size of the Spark image.
+# plain pandas / pyarrow / shapely code, so this image ships no JVM and no
+# PySpark — it is a fraction of the size of the Spark image.
 #
 #   docker build -f Dockerfile.enrich -t myregistry.io/harbour-detector-enrich:1.0.0 .
 #

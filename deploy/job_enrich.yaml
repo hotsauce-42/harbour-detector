@@ -92,7 +92,7 @@ spec:
                   name: harbour-detector-s3
                   key: region
 
-            # Phases 2-5 reach S3 through s3fs (no DuckDB here). For MinIO or other
+            # Phases 2-5 reach S3 through s3fs (no Spark here). For MinIO or other
             # S3-compatible endpoints, supply the endpoint URL.
             # - name: S3_ENDPOINT_URL
             #   valueFrom:

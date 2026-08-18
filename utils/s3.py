@@ -128,33 +128,3 @@ def get_s3_storage_options(s3_cfg: dict) -> dict:
         opts["client_kwargs"] = client_kwargs
 
     return opts
-
-
-def configure_duckdb_s3(con, s3_cfg: dict) -> None:
-    """
-    Load the httpfs extension and configure S3 credentials on a DuckDB connection.
-    Must be called before any read_parquet('s3://...') query on that connection.
-
-    MinIO note: sets s3_url_style='path' and s3_use_ssl when endpoint_url is present.
-    """
-    con.execute("INSTALL httpfs IF NOT EXISTS; LOAD httpfs;")
-
-    if s3_cfg.get("key"):
-        con.execute(f"SET s3_access_key_id='{_esc(s3_cfg['key'])}';")
-    if s3_cfg.get("secret"):
-        con.execute(f"SET s3_secret_access_key='{_esc(s3_cfg['secret'])}';")
-    if s3_cfg.get("region"):
-        con.execute(f"SET s3_region='{_esc(s3_cfg['region'])}';")
-
-    if s3_cfg.get("endpoint_url"):
-        endpoint = s3_cfg["endpoint_url"]
-        use_ssl  = endpoint.startswith("https://")
-        host     = endpoint.replace("https://", "").replace("http://", "").rstrip("/")
-        con.execute(f"SET s3_endpoint='{_esc(host)}';")
-        con.execute(f"SET s3_use_ssl={'true' if use_ssl else 'false'};")
-        con.execute("SET s3_url_style='path';")  # MinIO requires path-style addressing
-
-
-def _esc(value: str) -> str:
-    """Escape single quotes in a SQL string literal."""
-    return value.replace("'", "''")

@@ -1,6 +1,6 @@
 # Full local / dev install: every phase, the Streamlit GUI, and dev tooling.
 # The container images install the narrower files instead:
-#   Dockerfile.spark  -> requirements-spark.txt (base + pyspark + duckdb + JVM)
+#   Dockerfile.spark  -> requirements-spark.txt (base + pyspark + JVM)
 #   Dockerfile.enrich -> requirements-base.txt  (no Spark, no JVM)
 -r requirements-spark.txt
 

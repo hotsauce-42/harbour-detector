@@ -14,11 +14,10 @@ import pytest
 
 from pipeline.extract_stops import (
     Phase1Config,
-    _build_stop_segments,
+    _group_into_segments,
     _join_type5_data,
     _label_detection_method,
     _parse_locode,
-    run_phase1,
 )
 
 
@@ -67,8 +66,8 @@ def _write_parquet(rows: list[dict], path: Path) -> None:
     pq.write_table(pa.Table.from_pandas(df), path)
 
 
-@pytest.fixture
-def default_config(tmp_path):
+def _build_fixture(tmp_path: Path) -> Phase1Config:
+    """Write a small raw-AIS fixture and return the matching Phase 1 config."""
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()
 
@@ -96,24 +95,46 @@ def default_config(tmp_path):
     )
 
 
-def test_moored_vessel_produces_stop(default_config):
-    out = run_phase1(default_config)
-    stops = pd.read_parquet(out)
-    vessel_a = stops[stops["mmsi"] == 123456789]
+@pytest.fixture(scope="session")
+def spark():
+    """Local SparkSession for the Phase 1 end-to-end tests (needs a JVM)."""
+    pyspark = pytest.importorskip("pyspark")
+    session = (
+        pyspark.sql.SparkSession.builder
+        .appName("harbour-detector-tests")
+        .master("local[1]")
+        .config("spark.ui.enabled", "false")
+        .config("spark.sql.shuffle.partitions", "1")
+        .getOrCreate()
+    )
+    session.sparkContext.setLogLevel("ERROR")
+    yield session
+    session.stop()
+
+
+@pytest.fixture(scope="session")
+def spark_stops(spark, tmp_path_factory):
+    """Run Phase 1 once over the shared fixture data and return the stops."""
+    from pipeline.extract_stops_spark import run_phase1
+
+    tmp_path = tmp_path_factory.mktemp("phase1")
+    config = _build_fixture(tmp_path)
+    out = run_phase1(config, spark)
+    return pd.read_parquet(out)
+
+
+def test_moored_vessel_produces_stop(spark_stops):
+    vessel_a = spark_stops[spark_stops["mmsi"] == 123456789]
     assert len(vessel_a) == 1
     assert vessel_a.iloc[0]["duration_minutes"] >= 30
 
 
-def test_moving_vessel_excluded(default_config):
-    out = run_phase1(default_config)
-    stops = pd.read_parquet(out)
-    assert 234567890 not in stops["mmsi"].values
+def test_moving_vessel_excluded(spark_stops):
+    assert 234567890 not in spark_stops["mmsi"].values
 
 
-def test_sustained_speed_vessel_detected(default_config):
-    out = run_phase1(default_config)
-    stops = pd.read_parquet(out)
-    vessel_c = stops[stops["mmsi"] == 345678901]
+def test_sustained_speed_vessel_detected(spark_stops):
+    vessel_c = spark_stops[spark_stops["mmsi"] == 345678901]
     assert len(vessel_c) == 1
     assert vessel_c.iloc[0]["detection_method"] == "sustained_speed"
 
@@ -237,5 +258,5 @@ def test_positional_variance_rejects_drifting_vessel():
         min_messages_per_stop=3,
         max_gap_minutes=15.0,
     )
-    segments = _build_stop_segments(df, config)
+    segments = _group_into_segments(df, config)
     assert len(segments) == 0

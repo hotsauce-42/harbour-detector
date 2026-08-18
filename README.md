@@ -337,7 +337,7 @@ s3:
 | `EndpointResolutionError` / connection refused | Wrong endpoint or MinIO not running | Check `endpoint_url` — must not have a trailing slash |
 | `403 Forbidden` | Bucket policy or wrong credentials | Verify key/secret and that the bucket allows the operation |
 | `NoSuchKey` when reading interim files | Previous phase not run yet | Run phases in order (phase1 → phase2 → … → phase5) |
-| DuckDB `IO Error: Unable to connect` (Phase 1 only) | httpfs extension not installed | Run `pip install duckdb --upgrade`; ensure outbound HTTPS is allowed |
+| Spark `No FileSystem for scheme: s3a` (Phase 1 only) | Hadoop S3A JARs missing from the classpath | Use the Spark image, which downloads them at build time; locally, add `hadoop-aws` + `aws-java-sdk-bundle` to `pyspark/jars/` |
 
 ---
 
@@ -423,7 +423,7 @@ There are two images, matching the two halves of the pipeline:
 | Dockerfile | Image | Phases | Default entrypoint | Contents |
 |---|---|---|---|---|
 | `Dockerfile.spark` | `harbour-detector-spark` | 1 (and 1–5 if you want one pod) | `run_phase1.py` | JVM + PySpark + S3A JARs + full pipeline code |
-| `Dockerfile.enrich` | `harbour-detector-enrich` | 2–5 | `run_enrich.py` | pandas / pyarrow / shapely only — no JVM, no PySpark, no DuckDB, no OS packages |
+| `Dockerfile.enrich` | `harbour-detector-enrich` | 2–5 | `run_enrich.py` | pandas / pyarrow / shapely only — no JVM, no PySpark, no OS packages |
 
 Both images include:
 - Their default configuration (`config/settings.yaml`), overridable at runtime via environment variables
@@ -436,7 +436,7 @@ Dependencies are split to match:
 | File | Contents |
 |---|---|
 | `requirements-base.txt` | Shared runtime deps — installed by the enrichment image |
-| `requirements-spark.txt` | `requirements-base.txt` + `pyspark` + `duckdb` (both Phase 1 only) — installed by the Spark image |
+| `requirements-spark.txt` | `requirements-base.txt` + `pyspark` (Phase 1 only) — installed by the Spark image |
 | `requirements.txt` | `requirements-spark.txt` + Streamlit GUI + `pytest` / `ruff` / `mypy` — local development and CI |
 
 The shared runtime deps are **pinned exactly**. The two images are built separately and hand data over as Parquet, so a version floor would let them resolve different majors at their own build times — a Phase 1 image on pandas 2 feeding a Phase 2–5 image on pandas 3 disagrees about datetime resolution with no obvious symptom. Bump the pin, rebuild **both** images from the same commit, run `pytest`.
@@ -753,7 +753,7 @@ harbour-detector/
 │   ├── config.py                  # Shared config loader (YAML + env var overrides)
 │   ├── geo.py                     # Haversine distance, positional variance
 │   ├── overrides.py               # Manual GUI corrections shared by app.py and Phase 5
-│   ├── s3.py                      # S3 credential loading, path helpers, DuckDB httpfs setup
+│   ├── s3.py                      # S3 credential loading, path helpers, s3fs filesystem factory
 │   └── spark.py                   # SparkSession factory with S3A / MinIO configuration
 ├── tests/                         # Pytest unit tests for all phases
 ├── scripts/
