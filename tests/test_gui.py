@@ -477,10 +477,11 @@ def test_save_outline_ignores_an_unknown_harbour(outputs):
 
 # ── Feedback ───────────────────────────────────────────────────────────────
 
-def test_note_warns_that_trimming_will_not_last():
+def test_note_is_quiet_for_an_inward_edit():
+    # The stored outline is the union of both shapes on purpose, so drawing
+    # inside the detected one is normal use, not something to warn about.
     detected = box(0, 0, 10, 10)
-    note = app.outline_edit_note(detected, box(0, 0, 5, 10))
-    assert note and "floor" in note
+    assert app.outline_edit_note(detected, box(0, 0, 5, 10)) is None
 
 
 def test_note_is_quiet_for_a_pure_extension():

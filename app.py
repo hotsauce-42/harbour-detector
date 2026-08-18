@@ -563,29 +563,21 @@ def _edit_panel(feat: dict, paths: list[str], existing_db: str = "") -> None:
 
 def outline_edit_note(detected, drawn) -> str | None:
     """
-    Flag the parts of an outline edit that will not do what it looks like.
+    Flag an outline edit that will not do what it looks like.
 
-    Trimming is the important one: the drawn outline is a floor, so an inward
-    edit lasts only until the next pipeline run unions the detected area back
-    in. Better to say so at save time than to let it silently reappear.
+    Drawing *inside* the detected shape is not one of those cases: the stored
+    outline is the union of both, by design, so there is nothing to warn about.
+    Only an outline large enough to have caught a neighbour is worth a word.
     """
     if detected is None or detected.is_empty or drawn is None:
         return None
 
-    notes = []
-    trimmed = detected.difference(drawn).area
-    if trimmed > detected.area * 1e-6:
-        notes.append(
-            f"About {trimmed / detected.area:.0%} of the detected outline was "
-            "trimmed away. The manual outline is a floor, not a replacement — "
-            "the next pipeline run unions the detected area back in."
-        )
     if drawn.area > detected.area * 10:
-        notes.append(
+        return (
             "The drawn outline is more than 10× the detected area — check that "
             "it does not swallow a neighbouring harbour."
         )
-    return " ".join(notes) or None
+    return None
 
 
 def _outline_panel(
