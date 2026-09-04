@@ -17,6 +17,7 @@ pyyaml==6.0.3
 h3==4.4.2
 shapely==2.1.2           # geometry only — no geopandas/GDAL in the pipeline
 reverse_geocoder==1.5.1
+scipy==1.17.1           # k-d tree for utils.gazetteer (also a reverse_geocoder dep)
 pycountry==26.2.16
 # S3 support
 s3fs==2026.3.0

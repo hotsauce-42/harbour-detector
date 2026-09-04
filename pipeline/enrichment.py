@@ -5,8 +5,9 @@ For every harbour cluster:
   1. Polygon   — convert H3 cell set to a GeoJSON geometry via h3.cells_to_geo(),
                  plus a closed outline polygon of the harbour as a whole
   2. Country   — reverse-geocode the centroid with reverse_geocoder, map cc → full name
-  3. City      — nearest populated place (GeoNames cities500, pop > 500) from
-                 reverse_geocoder, filtered by min_population in post-processing
+  3. City      — nearest populated place from a GeoNames gazetteer
+                 (utils.gazetteer), with a population floor that scales with the
+                 harbour's size
 
 Output: data/interim/harbours_enriched.parquet
         (harbour_id is added in Phase 5; this file uses cluster_id as a temp key)
@@ -25,6 +26,7 @@ import reverse_geocoder as rg
 from shapely.geometry import shape
 from shapely.wkt import dumps as to_wkt
 
+from utils.gazetteer import Gazetteer, bbox_around
 from utils.geo import haversine_meters, outline_polygon
 from utils.s3 import (
     build_s3_config,
@@ -62,10 +64,28 @@ ENRICHED_SCHEMA = pa.schema([
 ])
 
 
+# Harbours large enough to reach a tier need a place of at least that many
+# people, so a major port is named after its city rather than the hamlet on its
+# edge. Keyed on n_cells because a harbour's cell count saturates at its
+# physical footprint, while n_events keeps growing with every day of AIS added.
+DEFAULT_CITY_TIERS = [
+    {"min_cells": 0, "min_population": 0},
+    {"min_cells": 100, "min_population": 1000},
+    {"min_cells": 1000, "min_population": 15000},
+]
+
+
 @dataclass
 class Phase4Config:
     interim_dir: str
-    city_min_population: int = 1000  # not enforced by reverse_geocoder; kept for docs
+    # GeoNames gazetteer from scripts/prepare_gazetteer.py. Empty → the
+    # cities1000 dataset bundled with reverse_geocoder, which has no place
+    # under 1000 people in it.
+    gazetteer_path: str = ""
+    city_population_tiers: list = field(default_factory=lambda: DEFAULT_CITY_TIERS)
+    # Past this, a tier's floor is dropped and the nearest place of any size
+    # wins — better a nearby village than a city on the far side of a bay.
+    max_city_dist_km: float = 50.0
     # Outline generation — see utils.geo.outline_polygon
     outline_buffer_meters: float = 75.0
     outline_simplify_meters: float = 0.0
@@ -77,7 +97,10 @@ class Phase4Config:
         p4 = cfg.get("phase4", {})
         return cls(
             interim_dir=cfg.get("data", {}).get("interim_dir", "data/interim"),
-            city_min_population=p4.get("city_min_population", 1000),
+            gazetteer_path=p4.get("gazetteer_path", ""),
+            city_population_tiers=p4.get("city_population_tiers",
+                                         DEFAULT_CITY_TIERS),
+            max_city_dist_km=float(p4.get("max_city_dist_km", 50.0)),
             outline_buffer_meters=p4.get("outline_buffer_meters", 75.0),
             outline_simplify_meters=p4.get("outline_simplify_meters", 0.0),
             outline_fill_holes=p4.get("outline_fill_holes", True),
@@ -148,7 +171,7 @@ def _add_polygons(clusters: pd.DataFrame, config: Phase4Config) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# Step 2 + 3: country + city via reverse_geocoder (single batch call)
+# Step 2 + 3: country (reverse_geocoder) + city (GeoNames gazetteer)
 # ---------------------------------------------------------------------------
 
 def _country_name(iso2: str) -> str:
@@ -161,13 +184,46 @@ def _country_name(iso2: str) -> str:
     return country.name
 
 
-def _add_geocoding(clusters: pd.DataFrame) -> pd.DataFrame:
+def population_floor(n_cells: int, tiers: list[dict]) -> int:
+    """
+    The population a harbour of this size demands of its city.
+
+    The highest tier the harbour reaches wins, so the tiers can be listed in
+    any order. A harbour below every tier has no floor at all — which is the
+    point: a small harbour should take the name of the village next to it.
+    """
+    floor = 0
+    for tier in sorted(tiers, key=lambda t: int(t.get("min_cells", 0))):
+        if n_cells >= int(tier.get("min_cells", 0)):
+            floor = int(tier.get("min_population", 0))
+    return floor
+
+
+def _add_geocoding(clusters: pd.DataFrame, config: Phase4Config) -> pd.DataFrame:
     logger.info("Reverse-geocoding %d cluster centroids …", len(clusters))
 
     coords = list(zip(clusters["centroid_lat"], clusters["centroid_lon"]))
 
+    # Country still comes from reverse_geocoder, deliberately: the harbour ID is
+    # '{country_iso2}-{hash}', so re-deriving the country from another source
+    # would re-ID every harbour and break Phase 5's match against the existing
+    # database. The city is not part of the ID and is free to improve.
     # mode=2 → quiet batch mode
     results = rg.search(coords, mode=2)
+
+    # Only the places near this run's harbours are worth indexing — the global
+    # gazetteer is 5.2M rows, the box around a country's coastline is ~50k.
+    gazetteer = Gazetteer.open(
+        config.gazetteer_path,
+        bbox=bbox_around(clusters["centroid_lat"], clusters["centroid_lon"]),
+        s3_cfg=config.s3_cfg,
+    )
+    tiers = config.city_population_tiers
+    if not gazetteer.has_population:
+        logger.info(
+            "  gazetteer carries no population column — size tiers are ignored "
+            "and the nearest place always wins",
+        )
 
     country_iso2 = []
     country_names = []
@@ -177,19 +233,51 @@ def _add_geocoding(clusters: pd.DataFrame) -> pd.DataFrame:
     city_dists_km = []
     admin1s = []
 
-    for (clat, clon), r in zip(coords, results):
+    n_floored = 0
+    for (clat, clon), r, n_cells in zip(coords, results, clusters["n_cells"]):
         iso2 = r.get("cc", "")
-        city_lat = float(r.get("lat", clat))
-        city_lon = float(r.get("lon", clon))
-        dist_km = haversine_meters(clat, clon, city_lat, city_lon) / 1000.0
-
         country_iso2.append(iso2)
         country_names.append(_country_name(iso2))
-        nearest_cities.append(r.get("name", ""))
-        city_lats.append(city_lat)
-        city_lons.append(city_lon)
-        city_dists_km.append(float(dist_km))
-        admin1s.append(r.get("admin1", ""))
+
+        floor = population_floor(int(n_cells), tiers)
+        place = gazetteer.nearest(clat, clon, floor)
+        # A floor that only reaches something implausibly far away is worse
+        # than no floor: fall back to whatever is actually next to the harbour.
+        if place is None or place.distance_km > config.max_city_dist_km:
+            fallback = gazetteer.nearest(clat, clon, 0)
+            place = fallback if fallback is not None else place
+        elif floor > 0:
+            n_floored += 1
+
+        if place is None:
+            # Nothing in the gazetteer at all — keep the columns aligned.
+            nearest_cities.append(r.get("name", ""))
+            city_lats.append(float(r.get("lat", clat)))
+            city_lons.append(float(r.get("lon", clon)))
+            city_dists_km.append(float(
+                haversine_meters(clat, clon,
+                                 float(r.get("lat", clat)),
+                                 float(r.get("lon", clon))) / 1000.0
+            ))
+            admin1s.append(r.get("admin1", ""))
+            continue
+
+        nearest_cities.append(place.name)
+        city_lats.append(place.lat)
+        city_lons.append(place.lon)
+        city_dists_km.append(place.distance_km)
+        admin1s.append(place.admin1 or r.get("admin1", ""))
+
+    if n_floored:
+        logger.info("  %d harbour(s) large enough to require a populated city",
+                    n_floored)
+    far = sum(1 for d in city_dists_km if d > config.max_city_dist_km)
+    if far:
+        logger.warning(
+            "  %d harbour(s) are more than %.0f km from any populated place — "
+            "check phase4.gazetteer_path covers this region",
+            far, config.max_city_dist_km,
+        )
 
     clusters = clusters.copy()
     clusters["country_iso2"] = country_iso2
@@ -273,5 +361,5 @@ def run_phase4(config: Phase4Config) -> str:
     logger.info("  loaded %d clusters", len(clusters))
 
     clusters = _add_polygons(clusters, config)
-    clusters = _add_geocoding(clusters)
+    clusters = _add_geocoding(clusters, config)
     return _write_enriched(clusters, config)

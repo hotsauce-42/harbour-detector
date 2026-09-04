@@ -15,8 +15,10 @@ from pipeline.enrichment import (
     _add_polygons,
     _country_name,
     _make_polygon_wkt,
+    population_floor,
     run_phase4,
 )
+from utils.gazetteer import GAZETTEER_SCHEMA
 
 RES = 11
 HAMBURG_LAT,    HAMBURG_LON    = 53.54,  9.97
@@ -196,7 +198,7 @@ def test_country_name_empty_string():
 
 def test_geocoding_hamburg():
     df = _make_clusters_df([_cluster_row(0, HAMBURG_LAT, HAMBURG_LON)])
-    result = _add_geocoding(df)
+    result = _add_geocoding(df, Phase4Config(interim_dir=""))
     assert result.iloc[0]["country_iso2"] == "DE"
     assert result.iloc[0]["country_name"] == "Germany"
     assert result.iloc[0]["nearest_city"] != ""
@@ -204,13 +206,13 @@ def test_geocoding_hamburg():
 
 def test_geocoding_singapore():
     df = _make_clusters_df([_cluster_row(0, SINGAPORE_LAT, SINGAPORE_LON)])
-    result = _add_geocoding(df)
+    result = _add_geocoding(df, Phase4Config(interim_dir=""))
     assert result.iloc[0]["country_iso2"] == "SG"
 
 
 def test_geocoding_city_distance_is_positive():
     df = _make_clusters_df([_cluster_row(0, ROTTERDAM_LAT, ROTTERDAM_LON)])
-    result = _add_geocoding(df)
+    result = _add_geocoding(df, Phase4Config(interim_dir=""))
     assert result.iloc[0]["nearest_city_dist_km"] >= 0
 
 
@@ -230,3 +232,115 @@ def test_run_phase4_end_to_end(tmp_path):
     assert set(result["country_iso2"]) == {"DE", "NL", "SG"}
     assert result["geometry_wkt"].notna().all()
     assert result["nearest_city"].str.len().gt(0).all()
+
+
+# ---------------------------------------------------------------------------
+# Nearest city — size tiers and the gazetteer
+# ---------------------------------------------------------------------------
+
+TIERS = [
+    {"min_cells": 0, "min_population": 0},
+    {"min_cells": 100, "min_population": 1000},
+    {"min_cells": 1000, "min_population": 15000},
+]
+
+
+def test_a_small_harbour_has_no_population_floor():
+    """Which is the point: it should take the name of the village beside it."""
+    assert population_floor(7, TIERS) == 0
+    assert population_floor(99, TIERS) == 0
+
+
+def test_the_floor_rises_with_the_harbour():
+    assert population_floor(100, TIERS) == 1000
+    assert population_floor(999, TIERS) == 1000
+    assert population_floor(5000, TIERS) == 15000
+
+
+def test_tiers_may_be_listed_in_any_order():
+    """They are config; nobody should have to keep them sorted by hand."""
+    assert population_floor(1000, list(reversed(TIERS))) == 15000
+
+
+def test_no_tiers_means_no_floor():
+    assert population_floor(10_000, []) == 0
+
+
+def _write_gazetteer(path, places) -> None:
+    columns = list(zip(*places))
+    pq.write_table(pa.table({
+        field.name: pa.array(list(values), type=field.type)
+        for field, values in zip(GAZETTEER_SCHEMA, columns)
+    }, schema=GAZETTEER_SCHEMA), path)
+
+
+def test_a_configured_gazetteer_names_a_harbour_after_its_village(tmp_path):
+    """
+    End to end through _add_geocoding: the village is 1 km away and absent from
+    cities1000, the town is 20 km away and in it. The small harbour gets the
+    village.
+    """
+    path = tmp_path / "places.parquet"
+    _write_gazetteer(path, [
+        ("Vejrø",   ROTTERDAM_LAT + 0.009, ROTTERDAM_LON,     0, "PPL", "NL", "Zuid"),
+        ("Big City", ROTTERDAM_LAT + 0.18,  ROTTERDAM_LON, 90000, "PPL", "NL", "Zuid"),
+    ])
+    df = _make_clusters_df([_cluster_row(0, ROTTERDAM_LAT, ROTTERDAM_LON)])
+
+    result = _add_geocoding(df, Phase4Config(interim_dir="", gazetteer_path=str(path)))
+
+    assert result.iloc[0]["nearest_city"] == "Vejrø"
+    assert result.iloc[0]["nearest_city_dist_km"] < 2
+    assert result.iloc[0]["admin1"] == "Zuid"
+    # The country still comes from reverse_geocoder — the harbour ID depends on
+    # it, so the gazetteer must not be able to move it.
+    assert result.iloc[0]["country_iso2"] == "NL"
+
+
+def test_a_large_harbour_skips_the_village_for_the_city(tmp_path):
+    path = tmp_path / "places.parquet"
+    _write_gazetteer(path, [
+        ("Vejrø",   ROTTERDAM_LAT + 0.009, ROTTERDAM_LON,     0, "PPL", "NL", "Zuid"),
+        ("Big City", ROTTERDAM_LAT + 0.18,  ROTTERDAM_LON, 90000, "PPL", "NL", "Zuid"),
+    ])
+    df = _make_clusters_df([
+        _cluster_row(0, ROTTERDAM_LAT, ROTTERDAM_LON, n_cells=7),
+    ])
+    df.loc[0, "n_cells"] = 2000          # a port, not a marina
+
+    result = _add_geocoding(
+        df, Phase4Config(interim_dir="", gazetteer_path=str(path),
+                         city_population_tiers=TIERS))
+
+    assert result.iloc[0]["nearest_city"] == "Big City"
+
+
+def test_an_unreachable_floor_falls_back_to_the_nearest_place(tmp_path):
+    """
+    A floor that only matches something 500 km away is worse than no floor —
+    better the village next door than a city across the sea.
+    """
+    path = tmp_path / "places.parquet"
+    _write_gazetteer(path, [
+        ("Vejrø",   ROTTERDAM_LAT + 0.009, ROTTERDAM_LON,     0, "PPL", "NL", "Zuid"),
+        ("Faraway", ROTTERDAM_LAT + 4.5,   ROTTERDAM_LON, 90000, "PPL", "NL", "Zuid"),
+    ])
+    df = _make_clusters_df([_cluster_row(0, ROTTERDAM_LAT, ROTTERDAM_LON)])
+    df.loc[0, "n_cells"] = 2000
+
+    result = _add_geocoding(
+        df, Phase4Config(interim_dir="", gazetteer_path=str(path),
+                         city_population_tiers=TIERS, max_city_dist_km=50))
+
+    assert result.iloc[0]["nearest_city"] == "Vejrø"
+
+
+def test_a_missing_gazetteer_still_produces_a_city(tmp_path):
+    """Phase 4 must run on a machine where nobody prepared the file."""
+    df = _make_clusters_df([_cluster_row(0, HAMBURG_LAT, HAMBURG_LON)])
+    result = _add_geocoding(
+        df, Phase4Config(interim_dir="",
+                         gazetteer_path=str(tmp_path / "absent.parquet")))
+
+    assert result.iloc[0]["nearest_city"] != ""
+    assert result.iloc[0]["country_iso2"] == "DE"

@@ -61,7 +61,24 @@ phase3:
   cluster_ring_size: 3
 
 phase4:
-  city_min_population: 1000        # minimum population for "nearest city" lookup
+  # Nearest-place lookup. Empty = the cities1000 dataset bundled with
+  # reverse_geocoder, which holds nothing under 1000 people — small harbours
+  # then get a town tens of km away. Build the dense file once with
+  # `python3 scripts/prepare_gazetteer.py` and point this at it.
+  gazetteer_path: "data/reference/geonames/places.parquet"
+  # A bigger harbour needs a more significant place, so a major port is named
+  # after its city rather than the hamlet on its edge. The highest tier the
+  # harbour reaches applies; below the first one there is no floor at all.
+  # Administrative seats (GeoNames PPLA*/PPLC) clear any floor regardless of
+  # their population. Keyed on n_cells: a harbour's cell count saturates at its
+  # physical footprint, while n_events grows with every day of AIS added.
+  city_population_tiers:
+    - {min_cells: 0,    min_population: 0}
+    - {min_cells: 100,  min_population: 1000}
+    - {min_cells: 1000, min_population: 15000}
+  # Past this the floor is dropped and the nearest place of any size wins —
+  # better a village next door than a city on the far side of a bay.
+  max_city_dist_km: 50
 
   # Harbour outline — the H3-cell union morphologically closed (dilated then
   # eroded) so the gaps between berths close and the interior holes left by

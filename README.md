@@ -118,10 +118,49 @@ Adjust these if your Parquet files use different column names.
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `city_min_population` | `1000` | Minimum city population for reverse geocoding lookup |
+| `gazetteer_path` | `""` | GeoNames places file from `scripts/prepare_gazetteer.py`. Empty falls back to the cities1000 dataset bundled with `reverse_geocoder` — see [Getting the city right](#getting-the-city-right) |
+| `city_population_tiers` | 0 / 100 cells → 1 000 / 1 000 cells → 15 000 | Population a harbour of a given `n_cells` demands of its city. Highest tier reached wins; below the first there is no floor. Administrative seats (GeoNames `PPLA*`/`PPLC`) clear any floor |
+| `max_city_dist_km` | `50` | Past this the floor is dropped and the nearest place of any size wins |
 | `outline_buffer_meters` | `75` | Closing radius for the harbour outline. Fills gaps narrower than 2× this (~150 m, three res-11 cells) without pushing the boundary more than ~1 buffer past the outermost cell. Raise it to merge terminals that are further apart into a single polygon. |
 | `outline_simplify_meters` | `0` | Vertex thinning tolerance for the outline. Off by default — it is the only step that can pull the boundary inside a trafficked cell (a 10 m tolerance already bites up to ~50 m, a whole res-11 cell). Raise it to shrink the output ~5× if that trade is acceptable. |
 | `outline_fill_holes` | `true` | Drop interior rings, so untrafficked cells inside a harbour leave no holes |
+
+#### Getting the city right
+
+Out of the box, `nearest_city` comes from the GeoNames **cities1000** dataset bundled inside `reverse_geocoder` — places with a population over 1 000. Nothing smaller is in the file, so a harbour beside a village of 300 gets named after a town tens of kilometres away. On a 331-harbour Danish run, 107 harbours sat more than 5 km from their assigned city and the worst sat 51 km away, on the far side of a sea.
+
+Build the dense gazetteer once and point `gazetteer_path` at it:
+
+```bash
+python3 scripts/prepare_gazetteer.py                      # global: 421 MB download, ~50 s
+python3 scripts/prepare_gazetteer.py --countries DK SE DE NO PL   # or just your region
+python3 scripts/prepare_gazetteer.py --source ~/allCountries.zip --no-download
+```
+
+It turns a GeoNames dump into `data/reference/geonames/places.parquet` — 5.2 M populated places, 115 MB, sorted by latitude. On the same Danish run:
+
+| | bundled cities1000 | dense gazetteer |
+|---|---|---|
+| median harbour → city | 2.3 km | **0.6 km** |
+| p90 | 12.8 km | **1.5 km** |
+| worst | 51.1 km | 11.3 km |
+| harbours >10 km from their city | 52 | **1** |
+
+```
+Grenaa (51.1 km)            →  Anholt (2.4 km)      the island's own harbour
+Nykobing Falster (22.1 km)  →  Gedser (0.5 km)      the ferry port
+Kalundborg (22.5 km)        →  Sejerby (0.6 km)
+```
+
+Cost at runtime is small because Phase 4 filters the file to a bounding box around the run's own centroids before indexing it: ~0.6 s and ~100 MB RSS for the Danish box (49 932 of 5.2 M places). Preparing the file peaks at 1.0 GB RSS, once.
+
+Two things this deliberately does **not** change:
+
+- **The country still comes from `reverse_geocoder`.** `harbour_id` is `{country_iso2}-{hash}`, so re-deriving the country from another source would re-ID every harbour and break Phase 5's matching against your existing database.
+- **A district is not a city — unless it is a town in its own right.** GeoNames records city districts as their own entries (`PPLX`) at the district rather than the town centre, which for a waterfront district is nearer the harbour. Left alone they name a harbour `Altstadt` or `Holmen` instead of Heiligenhafen or Copenhagen. A district is kept only if GeoNames counts people in it *and* no more populous place sits within 5 km — the stand-in for the parent-city link the dump does not carry. Warnemünde's nearest bigger place is Rostock, 12 km off, so a harbour there is still called Warnemünde; Christiania's is Copenhagen, 2 km off, so those harbours are called Copenhagen. Abandoned and destroyed places are dropped outright.
+- **Large harbours keep their city.** With every village in the gazetteer, the nearest place to a major port is often a hamlet on its edge. `city_population_tiers` raises the population floor as `n_cells` grows, so a port gets its city and a marina gets its village. Administrative seats are exempt from the floor, since GeoNames often records a small population for a county town.
+
+If nobody prepares the file, Phase 4 logs a warning and falls back to cities1000 — with the distance bug fixed, which by itself corrected 38 of those 331 harbours.
 
 ### `phase5` — ID matching
 
@@ -476,6 +515,22 @@ Both images include:
 - The `reverse_geocoder` GeoNames dataset, pre-warmed so no outbound internet is needed at runtime
 
 The Spark image additionally includes the Hadoop S3A connector JARs (`hadoop-aws` + `aws-java-sdk-bundle`), downloaded at build time so the container never needs Maven access at runtime.
+
+Neither image bakes in the **Phase 4 gazetteer** (`data/reference/geonames/places.parquet`, 115 MB) — it is data, not code, and rebuilding an image to refresh a GeoNames dump is the wrong shape. Supply it one of two ways:
+
+```yaml
+# Mount it and point Phase 4 at the mount
+env:
+  - name: PHASE4__GAZETTEER_PATH
+    value: /data/geonames/places.parquet
+```
+
+```bash
+# …or keep it on S3 alongside the rest of the pipeline's data
+PHASE4__GAZETTEER_PATH=s3://my-bucket/reference/geonames/places.parquet
+```
+
+An S3 URI uses the same credentials as every other path. If the file is missing or unreachable, Phase 4 logs a warning and falls back to the bundled cities1000 dataset rather than failing the run.
 
 Dependencies are split to match:
 

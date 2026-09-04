@@ -30,6 +30,9 @@ pytest
 # Lint (line-length 88, E/F/W rules — config in ruff.toml)
 ruff check .
 
+# Build the nearest-city gazetteer (once; 421 MB download, ~50 s, 1 GB RSS)
+python3 scripts/prepare_gazetteer.py --countries DK SE DE NO PL
+
 # Streamlit GUI
 streamlit run app.py
 
@@ -45,7 +48,9 @@ docker push myregistry.io/harbour-detector-enrich:1.0.0
 
 ## Architecture
 
-Five-phase pipeline: stop extraction (Phase 1, **Spark** — `applyInPandas` per MMSI) → H3 aggregation (Phase 2, pandas) → cluster formation (Phase 3, BFS with configurable `cluster_ring_size` to bridge gaps) → enrichment (Phase 4, shapely + reverse_geocoder) → ID matching/export (Phase 5, deterministic `CC-hex8` IDs e.g. `DE-b8d7e3a2`).
+Five-phase pipeline: stop extraction (Phase 1, **Spark** — `applyInPandas` per MMSI) → H3 aggregation (Phase 2, pandas) → cluster formation (Phase 3, BFS with configurable `cluster_ring_size` to bridge gaps) → enrichment (Phase 4, shapely + gazetteer) → ID matching/export (Phase 5, deterministic `CC-hex8` IDs e.g. `DE-b8d7e3a2`).
+
+Phase 4's `nearest_city` comes from `utils/gazetteer.py`, not `reverse_geocoder`: a k-d tree in ECEF coordinates over a GeoNames dump prepared by `scripts/prepare_gazetteer.py` (`phase4.gazetteer_path`), with a population floor that scales with `n_cells`. Country/ISO2 still comes from `reverse_geocoder` — see the gotcha below.
 
 Phase 5 writes three files: `harbours.geojson` (closed harbour outline), `harbours_cells.geojson` (exact H3-cell union), `harbours.parquet` (both, as `outline_wkt` / `geometry_wkt`). The outline is a morphological closing — `utils/geo.outline_polygon()`.
 
@@ -99,6 +104,12 @@ Only Phase 1 uses Spark; Phases 2–5 are plain pandas/pyarrow/shapely. Phases c
 - To exercise Phase 1 without starting a JVM, call `_group_into_segments` / `_label_detection_method` / `_join_type5_data` directly — the same functions the Spark UDF runs, and much faster in tests. The end-to-end path (read → filter → UDF → write) needs a real session: `tests/test_phase1.py` has session-scoped `spark` / `spark_stops` fixtures that run the Spark job once over a fixture file (~35 s, `local[1]`).
 
 - `ruff check .` is clean — keep it that way; a single new E501 now stands out instead of hiding in a backlog.
+
+- Never re-derive `country_iso2` from anything but `reverse_geocoder`. `make_harbour_id()` is `{country_iso2}-{uuid5(centroid_h3_r8)[:8]}`, so the country code is *inside the ID* — changing its source re-IDs every harbour and breaks Phase 5's match against the existing database. `nearest_city` and `admin1` are not in the ID and are free to change; that asymmetry is why Phase 4 still calls `rg.search()` even though the gazetteer could answer both.
+
+- `reverse_geocoder` is wrong in two ways that `utils/gazetteer.py` exists to fix. Its k-d tree is built on raw (lat, lon) **degrees**, so it minimises Euclidean distance in degree space — at 56°N a degree of longitude is 0.56× a degree of latitude, so places east/west are penalised ~1.8× and the "nearest" city often is not (38 of 331 harbours on a Danish run). It also bundles cities1000 (population > 1000), so no village is in it at all (52 of 331 harbours were >10 km from their city, worst 51 km). The library ships a `geodetic_in_ecef()` that would fix the first — but nothing calls it, and it passes degrees where radians belong.
+
+- GeoNames feature class `P` is not all settlements, and Phase 4's city depends on filtering it in two stages (`utils/gazetteer.py`). Stage one, `is_settlement`, is row-at-a-time and runs in both `prepare_gazetteer.py` and `drop_non_settlements` on load, so a file built before the rule existed is corrected without a 421 MB re-download: it drops `PPLQ`/`PPLW`/`PPLH`/`PPLCH` (gone) and any `PPLX` with no population — a district record positioned at the district, which for a waterfront district beats its own town centre on distance and names the harbour "Altstadt" or "Holmen" instead of Heiligenhafen or Copenhagen. Stage two, `drop_overshadowed_districts`, cannot be done row-at-a-time so it is load-only: a surviving district is kept only if no more populous place lies within `DISTRICT_ISOLATION_KM` (5 km). That is the stand-in for the parent-city link the dump does not carry — Warnemünde's nearest bigger place is Rostock at 12 km so it stays, Christiania's is Copenhagen at 2 km so it goes. On a DK/DE/PL extract it keeps 18 districts of 159, all absorbed towns: Travemünde, Warnemünde, Vegesack, Harburg, Bergedorf, Dąbie.
 
 - `phase4.outline_simplify_meters` must stay `0`: it is the only step that can pull the outline inside a trafficked cell, and a 10 m tolerance bites up to ~50 m — a whole res-11 cell.
 
