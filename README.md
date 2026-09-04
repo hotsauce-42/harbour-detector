@@ -391,6 +391,17 @@ streamlit run app.py -- --config config/settings.yaml
 
 The app opens in your browser. Use the sidebar to switch tile layers, search by city or country, and sort the harbour list. Click any row in the table to show that harbour on the map.
 
+### Seeing a whole city at once
+
+A large port is usually several harbours, and the table gives no sense of how they sit relative to each other. When the selected harbour shares its city with others, a **Show all N harbours in {city}** toggle appears above the map: the rest of the group is drawn in grey around the selected one, and the view fits the whole group.
+
+**Click any grey harbour to select it.** Everything below follows the click — the metrics row, **Edit location details**, the outline editor, and **Full properties**, which opens automatically on the harbour you clicked. So the group view is also the way to work through a port harbour by harbour without going back to the table each time.
+
+Two details worth knowing:
+
+- Grouping is by city **and** country. Hamburg (DE) and Hamburg (NY) are different places, and putting both on one map would zoom out to the Atlantic. A harbour with an empty `nearest_city` is a group of one — a missing value is not a place that harbours share.
+- Click-to-select pauses while **Edit outline** is on, so a stray click cannot swap harbours out from under an unsaved outline. The group stays visible as context; turn editing off to move on to the next harbour.
+
 ### Editing a harbour's location details
 
 Reverse geocoding gets the country right nearly always, but `nearest_city` is simply whatever GeoNames has closest to the centroid — for a large port that is often a suburb rather than the port city, and `admin1` can be wrong near a regional border. Select a harbour and open **Edit location details** to correct the city, region and country by hand. The harbour ID is not editable — it is what the matching keys on.

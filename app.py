@@ -24,7 +24,7 @@ import pandas as pd
 import streamlit as st
 import yaml
 from folium.plugins import Draw
-from shapely.geometry import MultiPolygon, mapping, shape
+from shapely.geometry import MultiPolygon, Point, mapping, shape
 from shapely.ops import unary_union
 from shapely.wkt import dumps as to_wkt
 from shapely.wkt import loads as from_wkt
@@ -347,19 +347,89 @@ def save_harbour_outline(
     return written
 
 
-def _row_for_harbour(
-    df: pd.DataFrame,
-    features: list[dict],
-    harbour_id: str | None,
-) -> int:
-    """Row position of a harbour in the filtered table, or 0 when not present."""
-    if not harbour_id or df.empty:
-        return 0
-    for pos in range(len(df)):
-        idx = int(df.iloc[pos]["_idx"])
-        if features[idx].get("properties", {}).get("harbour_id") == harbour_id:
-            return pos
-    return 0
+def _index_for_harbour(features: list[dict], harbour_id: str | None) -> int | None:
+    """
+    Position of a harbour in the feature list, or None when it is not there.
+
+    Resolved against the features rather than the filtered table, so a harbour
+    picked on the map stays selected even when the search box would have hidden
+    its row.
+    """
+    if not harbour_id:
+        return None
+    for i, feat in enumerate(features):
+        if feat.get("properties", {}).get("harbour_id") == harbour_id:
+            return i
+    return None
+
+
+def _city_key(props: dict) -> tuple[str, str] | None:
+    """
+    What counts as "the same city", or None for a harbour that has no city.
+
+    Country is part of the key: the same city name in two countries is two
+    different places, and drawing both on one map would zoom out to nothing.
+    An empty `nearest_city` is not a place either — those harbours are a group
+    of one rather than one big "Unknown" pile.
+    """
+    city = (props.get("nearest_city") or "").strip().casefold()
+    if not city:
+        return None
+    country = (props.get("country_iso2")
+               or props.get("country_name") or "").strip().casefold()
+    return city, country
+
+
+def city_harbours(features: list[dict], index: int) -> list[int]:
+    """Indices of the *other* harbours the pipeline placed in the same city."""
+    key = _city_key(features[index].get("properties", {}))
+    if key is None:
+        return []
+    return [
+        i for i, feat in enumerate(features)
+        if i != index and _city_key(feat.get("properties", {})) == key
+    ]
+
+
+# A click that caught the outline's stroke from just outside it still counts.
+# 2e-4° is roughly 20 m — under half a res-11 cell, so it cannot reach past a
+# harbour into its neighbour.
+CLICK_TOLERANCE_DEG = 2e-4
+
+
+def harbour_at_click(
+    candidates: list[tuple[str, dict]],
+    click: dict | None,
+    tolerance: float = CLICK_TOLERANCE_DEG,
+) -> str | None:
+    """
+    Which harbour a map click landed on, or None for a click on open water.
+
+    streamlit-folium reports `last_object_clicked` for a click on *any* layer,
+    the basemap tiles included, so the point has to be tested against the
+    harbours themselves — the event alone means nothing. The nearest harbour
+    within the tolerance wins, which settles a click on a shared boundary.
+    """
+    if not isinstance(click, dict):
+        return None
+    lat, lon = click.get("lat"), click.get("lng")
+    if lat is None or lon is None:
+        return None
+
+    point = Point(lon, lat)
+    best, best_distance = None, None
+    for harbour_id, geom in candidates:
+        if not harbour_id or not geom:
+            continue
+        try:
+            distance = shape(geom).distance(point)
+        except Exception:
+            continue
+        if distance > tolerance:
+            continue
+        if best_distance is None or distance < best_distance:
+            best, best_distance = harbour_id, distance
+    return best
 
 
 def _build_display_df(features: list[dict]) -> pd.DataFrame:
@@ -393,6 +463,20 @@ CELLS_STYLE = {
     "color":       "#E65100",
     "weight":      1,
     "fillOpacity": 0.45,
+}
+# The city's other harbours, drawn as context: grey and thin, so the selected
+# harbour stays the obvious subject of the map.
+SIBLING_OUTLINE_STYLE = {
+    "fillColor":   "#78909C",
+    "color":       "#37474F",
+    "weight":      1.5,
+    "fillOpacity": 0.18,
+}
+SIBLING_CELLS_STYLE = {
+    "fillColor":   "#B0BEC5",
+    "color":       "#607D8B",
+    "weight":      0.8,
+    "fillOpacity": 0.25,
 }
 
 SHOW_OUTLINE = "Outline"
@@ -451,46 +535,45 @@ def _add_draw_control(m: folium.Map, geom, label: str) -> None:
     ).add_to(m)
 
 
-def _build_map(
-    feat: dict,
-    tile_url: str,
-    tile_attr: str,
-    tile_name: str,
-    cells_geom: dict | None = None,
-    show: str = SHOW_OUTLINE,
-    editable: bool = False,
-) -> folium.Map:
-    props        = feat.get("properties", {})
-    outline_geom = feat.get("geometry")
-
-    clat = props.get("centroid_lat", 0.0)
-    clon = props.get("centroid_lon", 0.0)
-
-    m = folium.Map(location=[clat, clon], zoom_start=13, tiles=None)
-    folium.TileLayer(tiles=tile_url, attr=tile_attr, name=tile_name).add_to(m)
-
-    city    = props.get("nearest_city", "Harbour")
-    hid     = props.get("harbour_id", "")[:8]
-    country = props.get("country_name", "")
+def _popup_html(props: dict) -> str:
+    """The metadata card shown when a harbour on the map is clicked."""
     vessels = props.get("n_unique_mmsi", props.get("n_unique_mmsi_approx", 0))
-
-    popup_html = f"""
-    <b>{city}, {country}</b><br/>
-    ID: {hid}…<br/>
+    return f"""
+    <b>{props.get('nearest_city', 'Harbour')}, {props.get('country_name', '')}</b><br/>
+    ID: {props.get('harbour_id', '')[:8]}…<br/>
     Events: {props.get('n_events', 0):,}<br/>
     Vessels: {vessels:,}<br/>
     H3 cells: {props.get('n_cells', 0)}<br/>
     Draught changes: {props.get('n_draught_changes', 0)}
     """
 
-    # Outline first so the finer cells stay legible on top of it. While editing
-    # it is drawn by the draw control instead, so it is not added twice.
-    layers = []
-    if show in (SHOW_OUTLINE, SHOW_BOTH) and outline_geom and not editable:
-        layers.append((outline_geom, OUTLINE_STYLE, f"{city} — outline"))
-    if show in (SHOW_CELLS, SHOW_BOTH) and cells_geom:
-        layers.append((cells_geom, CELLS_STYLE, f"{city} — H3 cells"))
 
+def _add_harbour_layers(
+    m: folium.Map,
+    feat: dict,
+    cells_geom: dict | None,
+    show: str,
+    outline_style: dict,
+    cells_style: dict,
+    skip_outline: bool = False,
+) -> list[dict]:
+    """
+    Draw one harbour on the map. Returns the geometries it added, for the fit.
+
+    Outline first so the finer cells stay legible on top of it. `skip_outline`
+    is for the harbour being edited, whose outline the draw control owns.
+    """
+    props = feat.get("properties", {})
+    city  = props.get("nearest_city", "Harbour")
+    hid   = props.get("harbour_id", "")[:8]
+
+    layers = []
+    if show in (SHOW_OUTLINE, SHOW_BOTH) and feat.get("geometry") and not skip_outline:
+        layers.append((feat["geometry"], outline_style, f"{city} — outline"))
+    if show in (SHOW_CELLS, SHOW_BOTH) and cells_geom:
+        layers.append((cells_geom, cells_style, f"{city} — H3 cells"))
+
+    popup_html = _popup_html(props)
     for geom, style, label in layers:
         gj = folium.GeoJson(
             geom,
@@ -502,16 +585,54 @@ def _build_map(
         folium.Popup(popup_html, max_width=260).add_to(gj)
         gj.add_to(m)
 
-    if editable and outline_geom:
-        _add_draw_control(m, shape(outline_geom), f"{city} — outline (editing)")
+    return [geom for geom, _, _ in layers]
 
-    # Fit the view to everything drawn (the outline already covers the cells).
-    bounds_source = outline_geom if (outline_geom and show != SHOW_CELLS) else None
-    if bounds_source is None and layers:
-        bounds_source = layers[0][0]
-    if bounds_source:
+
+def _build_map(
+    feat: dict,
+    tile_url: str,
+    tile_attr: str,
+    tile_name: str,
+    cells_geom: dict | None = None,
+    show: str = SHOW_OUTLINE,
+    editable: bool = False,
+    siblings: list[dict] | None = None,
+    sibling_cells: dict[str, dict] | None = None,
+) -> folium.Map:
+    props        = feat.get("properties", {})
+    outline_geom = feat.get("geometry")
+
+    clat = props.get("centroid_lat", 0.0)
+    clon = props.get("centroid_lon", 0.0)
+
+    m = folium.Map(location=[clat, clon], zoom_start=13, tiles=None)
+    folium.TileLayer(tiles=tile_url, attr=tile_attr, name=tile_name).add_to(m)
+
+    # The city's other harbours go down first, so the selected one is on top of
+    # them wherever two outlines happen to overlap.
+    drawn = []
+    for other in siblings or []:
+        other_id = other.get("properties", {}).get("harbour_id")
+        drawn += _add_harbour_layers(
+            m, other, (sibling_cells or {}).get(other_id), show,
+            SIBLING_OUTLINE_STYLE, SIBLING_CELLS_STYLE,
+        )
+
+    drawn += _add_harbour_layers(
+        m, feat, cells_geom, show, OUTLINE_STYLE, CELLS_STYLE,
+        skip_outline=editable,
+    )
+
+    if editable and outline_geom:
+        city = props.get("nearest_city", "Harbour")
+        _add_draw_control(m, shape(outline_geom), f"{city} — outline (editing)")
+        drawn.append(outline_geom)
+
+    # Fit the view to everything drawn — for one harbour that is its outline
+    # (which already covers its cells), for a city view the whole group.
+    if drawn:
         try:
-            bounds = shape(bounds_source).bounds  # (minlon, minlat, maxlon, maxlat)
+            bounds = unary_union([shape(g) for g in drawn]).bounds
             m.fit_bounds([[bounds[1], bounds[0]], [bounds[3], bounds[2]]])
         except Exception:
             pass
@@ -684,7 +805,7 @@ def _after_save(harbour_id: str, note: str | None, message: str) -> None:
     st.rerun()
 
 
-def _map_legend(show: str) -> None:
+def _map_legend(show: str, siblings: bool = False) -> None:
     """Colour key matching the layers currently drawn."""
     swatch = (
         '<span style="display:inline-block;width:11px;height:11px;'
@@ -701,6 +822,12 @@ def _map_legend(show: str) -> None:
         entries.append(
             swatch.format(fill=CELLS_STYLE["fillColor"], line=CELLS_STYLE["color"])
             + "H3 cells with stop events"
+        )
+    if siblings:
+        entries.append(
+            swatch.format(fill=SIBLING_OUTLINE_STYLE["fillColor"],
+                          line=SIBLING_OUTLINE_STYLE["color"])
+            + "Other harbours in this city"
         )
     st.markdown(
         '<div style="font-size:0.85em;opacity:0.85;">'
@@ -818,18 +945,23 @@ def main() -> None:
 
     st.divider()
 
-    # Resolve which harbour is selected. Saving an edit triggers a rerun, which
-    # clears the table selection — fall back to the harbour we were just on
-    # rather than snapping back to the first row.
-    selected_rows = getattr(getattr(selection, "selection", None), "rows", [])
-    if selected_rows:
-        row_pos = int(selected_rows[0])
-    else:
-        row_pos = _row_for_harbour(
-            df, features, st.session_state.get("selected_harbour_id")
+    # Resolve which harbour is selected. The session holds the answer; a table
+    # row only overrides it on the rerun that follows its own click, because
+    # the table keeps reporting that row afterwards — including on the reruns a
+    # map click or a save triggers, which would otherwise undo them.
+    selected_rows = list(getattr(getattr(selection, "selection", None), "rows", []))
+    if selected_rows and selected_rows != st.session_state.get("table_rows"):
+        clicked_idx = int(df.iloc[min(selected_rows[0], len(df) - 1)]["_idx"])
+        st.session_state["selected_harbour_id"] = (
+            features[clicked_idx].get("properties", {}).get("harbour_id")
         )
-    row_pos       = min(row_pos, len(df) - 1)
-    global_idx    = int(df.iloc[row_pos]["_idx"]) if len(df) > 0 else 0
+    st.session_state["table_rows"] = selected_rows
+
+    global_idx = _index_for_harbour(
+        features, st.session_state.get("selected_harbour_id")
+    )
+    if global_idx is None:
+        global_idx = int(df.iloc[0]["_idx"]) if len(df) > 0 else 0
 
     feat  = features[global_idx]
     props = feat.get("properties", {})
@@ -868,11 +1000,27 @@ def main() -> None:
     edit_label = "Edit outline"
     if manual_outline(props):
         edit_label += "  •  manually adjusted"
-    editing = st.toggle(
+
+    edit_col, city_col = st.columns(2)
+    editing = edit_col.toggle(
         edit_label, key=f"outline_mode_{hid}",
         help="Turn on to drag the outline's vertices. The map then reports "
              "every edit back to the app, so it redraws on each change.",
     )
+
+    sibling_idx = city_harbours(features, global_idx)
+    city_view = False
+    if sibling_idx:
+        # Keyed globally, not per harbour: clicking a sibling changes the
+        # selection, and a per-harbour key would switch the view straight back
+        # off under the click that used it.
+        city_view = city_col.toggle(
+            f"Show all {len(sibling_idx) + 1} harbours in {city}",
+            key="city_view",
+            help="Draws the city's other harbours in grey. Click one to select "
+                 "it — the metrics, the edit form and the outline editor all "
+                 "follow the selection.",
+        )
 
     fmap = _build_map(
         feat,
@@ -882,23 +1030,56 @@ def main() -> None:
         cells_geom=cells_by_id.get(props.get("harbour_id")),
         show=show_geom,
         editable=editing,
+        siblings=[features[i] for i in sibling_idx] if city_view else None,
+        sibling_cells=cells_by_id if city_view else None,
     )
-    # all_drawings is only worth the extra reruns while an edit is in progress.
+
+    # Each returned object costs a rerun per interaction, so ask only for the
+    # one the current mode acts on: the drawings while editing, the click that
+    # selects a harbour in the city view, nothing at all otherwise.
+    if editing:
+        mode, returned = "edit", ["all_drawings"]
+    elif city_view:
+        mode, returned = "city", ["last_object_clicked"]
+    else:
+        mode, returned = "view", []
+
     map_state = st_folium(
         fmap,
         use_container_width=True,
         height=500,
-        returned_objects=["all_drawings"] if editing else [],
-        key=f"map_{hid}_{'edit' if editing else 'view'}",
+        returned_objects=returned,
+        key=f"map_{hid}_{mode}",
     )
 
+    if mode == "city":
+        candidates = [
+            (features[i].get("properties", {}).get("harbour_id"),
+             features[i].get("geometry"))
+            for i in [global_idx, *sibling_idx]
+        ]
+        clicked = harbour_at_click(candidates,
+                                   (map_state or {}).get("last_object_clicked"))
+        if clicked and clicked != hid:
+            st.session_state["selected_harbour_id"] = clicked
+            # Clicking a harbour is a request to look at it — open the full
+            # properties on the way through rather than making it a second step.
+            st.session_state["expand_props"] = True
+            st.rerun()
+
     if editing:
+        if city_view:
+            st.caption(
+                "Click-to-select is paused while editing, so a stray click "
+                "cannot swap harbours out from under an unsaved outline."
+            )
         _outline_panel(feat, [output_file, cells_file], output_file, map_state)
 
-    _map_legend(show_geom)
+    _map_legend(show_geom, siblings=city_view)
 
     # ── Details expander ───────────────────────────────────────────────────
-    with st.expander("Full properties"):
+    with st.expander("Full properties",
+                     expanded=st.session_state.pop("expand_props", False)):
         display_props = {k: v for k, v in props.items() if k != "h3_cells"}
         st.json(display_props)
         h3_cells = props.get("h3_cells", [])

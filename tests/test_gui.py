@@ -321,12 +321,13 @@ def test_edit_form_rejects_nothing_when_unchanged(outputs):
     assert app.OVERRIDES_KEY not in _props(outputs / "harbours.geojson")
 
 
-def test_row_for_harbour_finds_selection_after_rerun(outputs):
+def test_index_for_harbour_finds_selection_after_rerun(outputs):
     feats = app.load_features.__wrapped__(str(outputs / "harbours.geojson"))
-    df = app._build_display_df(feats)
-    assert app._row_for_harbour(df, feats, "DE-abcd1234") == 0
-    assert app._row_for_harbour(df, feats, "XX-unknown") == 0
-    assert app._row_for_harbour(df, feats, None) == 0
+    assert app._index_for_harbour(feats, "DE-abcd1234") == 0
+    # None, not 0: an unknown harbour must not read as "the first one", which
+    # is what lets a map click on a harbour the search box filtered out stand.
+    assert app._index_for_harbour(feats, "XX-unknown") is None
+    assert app._index_for_harbour(feats, None) is None
 
 
 # ---------------------------------------------------------------------------
@@ -677,3 +678,192 @@ def test_assets_are_left_alone_when_the_flag_is_off(folium_assets_restored):
     before = map_assets.asset_urls()
     app._apply_map_assets({})
     assert map_assets.asset_urls() == before
+
+
+# ── The city view ──────────────────────────────────────────────────────────
+
+def _city_feature(hid: str, geom, city: str, iso2: str,
+                  country: str = "Germany", events: int = 100) -> dict:
+    feat = _feature(hid, geom, "outline")
+    feat["properties"].update({
+        "nearest_city": city,
+        "country_iso2": iso2,
+        "country_name": country,
+        "n_events":     events,
+        "centroid_lat": geom.centroid.y,
+        "centroid_lon": geom.centroid.x,
+    })
+    return feat
+
+
+@pytest.fixture
+def city_features() -> list[dict]:
+    """Two harbours in Hamburg, one in Kiel, one in a different country."""
+    return [
+        _city_feature("DE-hamburg01", box(9.90, 53.50, 9.94, 53.54), "Hamburg", "DE",
+                      events=300),
+        _city_feature("DE-hamburg02", box(10.00, 53.56, 10.04, 53.60), "Hamburg", "DE",
+                      events=200),
+        _city_feature("DE-kiel00001", box(10.10, 54.30, 10.14, 54.34), "Kiel", "DE",
+                      events=100),
+        _city_feature("US-hamburg03", box(-74.0, 40.7, -73.9, 40.8), "Hamburg", "US",
+                      country="United States", events=50),
+    ]
+
+
+@pytest.fixture
+def city_outputs(tmp_path, city_features) -> Path:
+    fc = {"type": "FeatureCollection", "features": city_features}
+    (tmp_path / "harbours.geojson").write_text(json.dumps(fc), encoding="utf-8")
+    return tmp_path
+
+
+@pytest.fixture
+def restore_st_folium():
+    """The click tests swap the map component out — put it back afterwards."""
+    original = app.st_folium
+    yield
+    app.st_folium = original
+
+
+def test_city_group_is_the_same_city_in_the_same_country(city_features):
+    """
+    Hamburg NY is not Hamburg DE. Grouping on the name alone would put both on
+    one map, and fitting the bounds to that pair zooms out to the Atlantic.
+    """
+    assert app.city_harbours(city_features, 0) == [1]
+    assert app.city_harbours(city_features, 1) == [0]
+    assert app.city_harbours(city_features, 2) == []       # only harbour in Kiel
+    assert app.city_harbours(city_features, 3) == []       # the American Hamburg
+
+
+def test_a_harbour_with_no_city_is_a_group_of_one():
+    """An empty `nearest_city` is a missing value, not a place they share."""
+    feats = [_city_feature("DE-a", box(0, 0, 1, 1), "", "DE"),
+             _city_feature("DE-b", box(2, 2, 3, 3), "", "DE")]
+    assert app.city_harbours(feats, 0) == []
+
+
+def test_a_click_inside_a_harbour_picks_that_harbour(city_features):
+    candidates = [(f["properties"]["harbour_id"], f["geometry"])
+                  for f in city_features]
+    assert app.harbour_at_click(
+        candidates, {"lat": 53.58, "lng": 10.02}) == "DE-hamburg02"
+
+
+def test_a_click_on_open_water_picks_nothing(city_features):
+    """
+    streamlit-folium fires the same event for the basemap as for a polygon, so
+    the click point has to land on a harbour before it counts as a selection.
+    """
+    candidates = [(f["properties"]["harbour_id"], f["geometry"])
+                  for f in city_features]
+    assert app.harbour_at_click(candidates, {"lat": 53.0, "lng": 5.0}) is None
+    assert app.harbour_at_click(candidates, None) is None
+    assert app.harbour_at_click(candidates, {"lat": None, "lng": None}) is None
+    assert app.harbour_at_click(candidates, "not a click") is None
+
+
+def test_a_click_on_the_outline_stroke_still_counts(city_features):
+    """The stroke is drawn on the boundary, so half of it is outside the shape."""
+    candidates = [("DE-hamburg01", city_features[0]["geometry"])]
+    just_outside = {"lat": 53.54 + app.CLICK_TOLERANCE_DEG / 2, "lng": 9.92}
+    well_outside = {"lat": 53.54 + app.CLICK_TOLERANCE_DEG * 10, "lng": 9.92}
+    assert app.harbour_at_click(candidates, just_outside) == "DE-hamburg01"
+    assert app.harbour_at_click(candidates, well_outside) is None
+
+
+def _city_map(city_features, **kwargs):
+    return app._build_map(city_features[0], "https://t/{z}/{x}/{y}.png", "attr",
+                          "tiles", **kwargs).get_root().render()
+
+
+def test_city_view_draws_the_siblings_in_their_own_style(city_features):
+    js = _city_map(city_features, siblings=[city_features[1]])
+
+    assert js.count("L.geoJson") == 2
+    assert app.SIBLING_OUTLINE_STYLE["fillColor"] in js
+    assert app.OUTLINE_STYLE["fillColor"] in js
+
+
+def test_city_view_fits_the_bounds_around_the_whole_group(city_features):
+    """
+    Fitting to the selected harbour alone would leave the harbour the operator
+    is meant to click on off-screen.
+    """
+    js = _city_map(city_features, siblings=[city_features[1]])
+
+    got = re.search(r"fitBounds\(\s*\[\[([-\d.]+), ([-\d.]+)\], "
+                    r"\[([-\d.]+), ([-\d.]+)\]\]", js)
+    assert got, "no fitBounds in the rendered map"
+    min_lat, min_lon, max_lat, max_lon = (float(g) for g in got.groups())
+    assert (min_lat, min_lon) == pytest.approx((53.50, 9.90))
+    assert (max_lat, max_lon) == pytest.approx((53.60, 10.04))
+
+
+def test_a_lone_harbour_is_unchanged_by_the_feature(city_features):
+    """The default path must still fit to the one harbour it draws."""
+    js = _city_map(city_features)
+    got = re.search(r"fitBounds\(\s*\[\[([-\d.]+), ([-\d.]+)\], "
+                    r"\[([-\d.]+), ([-\d.]+)\]\]", js)
+    assert [float(g) for g in got.groups()] == pytest.approx(
+        [53.50, 9.90, 53.54, 9.94])
+    assert app.SIBLING_OUTLINE_STYLE["fillColor"] not in js
+
+
+def test_no_city_toggle_when_the_harbour_stands_alone(outputs):
+    at = _app_on(outputs)
+    assert not at.exception
+    assert "city_view" not in [t.key for t in at.toggle]
+
+
+def test_clicking_a_sibling_selects_it_for_editing(city_outputs,
+                                                   restore_st_folium):
+    """
+    The point of the whole feature: the click has to move the selection, so the
+    edit form, the outline editor and the properties all follow it.
+    """
+    at = _app_on(city_outputs)
+    assert at.session_state["selected_harbour_id"] == "DE-hamburg01"
+
+    at.toggle(key="city_view").set_value(True)
+    app.st_folium = lambda *a, **k: {
+        "last_object_clicked": {"lat": 53.58, "lng": 10.02}   # inside hamburg02
+    }
+    at = at.run()
+
+    assert not at.exception
+    assert at.session_state["selected_harbour_id"] == "DE-hamburg02"
+    # The edit form and the outline editor are keyed by harbour — their
+    # presence is what proves the selection actually moved.
+    assert at.text_input(key="edit_DE-hamburg02_nearest_city").value == "Hamburg"
+    assert "outline_mode_DE-hamburg02" in [t.key for t in at.toggle]
+
+
+def test_clicking_open_water_leaves_the_selection_alone(city_outputs,
+                                                        restore_st_folium):
+    at = _app_on(city_outputs)
+    at.toggle(key="city_view").set_value(True)
+    app.st_folium = lambda *a, **k: {
+        "last_object_clicked": {"lat": 53.0, "lng": 5.0}      # the North Sea
+    }
+    at = at.run()
+
+    assert not at.exception
+    assert at.session_state["selected_harbour_id"] == "DE-hamburg01"
+
+
+def test_the_city_view_survives_the_click_that_uses_it(city_outputs,
+                                                       restore_st_folium):
+    """
+    A per-harbour key would reset the toggle as soon as the selection moved,
+    switching the view off under the very click that used it.
+    """
+    at = _app_on(city_outputs)
+    at.toggle(key="city_view").set_value(True)
+    app.st_folium = lambda *a, **k: {
+        "last_object_clicked": {"lat": 53.58, "lng": 10.02}
+    }
+    at = at.run()
+
+    assert at.toggle(key="city_view").value is True
