@@ -131,3 +131,15 @@ gui:
     # - name: "My Server"
     #   url: "https://mytiles.example.com/{z}/{x}/{y}.png"
     #   attribution: "© My Company"
+    #
+    # Offline: replace the four public entries above with your own server —
+    # leaving them in costs a DNS timeout every time one is selected.
+
+  # Offline deployments: serve Leaflet/Leaflet.Draw from static/vendor/ instead
+  # of the public CDNs. Run scripts/vendor_map_assets.py first to fill it.
+  # Overridable with GUI__LOCAL_MAP_ASSETS=true.
+  local_map_assets: false
+  # Where those files are served from. The default is this app's own static
+  # directory; point it elsewhere (e.g. "https://maps.internal/leaflet") to
+  # serve them from the same host as the tiles.
+  # map_assets_url: "/app/static/vendor"

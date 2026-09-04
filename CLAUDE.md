@@ -33,6 +33,9 @@ ruff check .
 # Streamlit GUI
 streamlit run app.py
 
+# Vendor Leaflet into static/vendor/ for offline use (needs internet once)
+python3 scripts/vendor_map_assets.py
+
 # Docker — two images: Spark (Phase 1) and enrichment (Phases 2-5)
 docker build -f Dockerfile.spark  -t myregistry.io/harbour-detector-spark:1.0.0  .
 docker build -f Dockerfile.enrich -t myregistry.io/harbour-detector-enrich:1.0.0 .
@@ -106,6 +109,10 @@ Only Phase 1 uses Spark; Phases 2–5 are plain pandas/pyarrow/shapely. Phases c
 - After `unary_union`, do **not** assert `result.covers(input)`: GEOS shifts boundary coordinates by a few ULPs, and at harbour scale (~1e-6 deg²) that is enough to make the predicate False over a zero-area sliver. Assert `input.difference(result).area` is ~0 instead — that is the invariant `merge_outlines` actually guarantees.
 
 - Leaflet.Draw's edit toolbar only touches `L.Polygon` layers in the `FeatureGroup` handed to `Draw(feature_group=…)`. `folium.GeoJson` renders an `L.GeoJSON` group, whose contents the toolbar ignores — so the editable outline is rebuilt as `folium.Polygon` per part (`app._editable_polygons`). streamlit-folium then renames that group to `window.drawnItems` (a regex in its `_get_map_string`) and reports it back as `all_drawings`; if that rename ever stops matching, editing silently returns nothing.
+
+- folium's rendered page pulls Leaflet, Leaflet.Draw and four unused libraries (jquery, bootstrap, glyphicons, fontawesome/awesome-markers) from four public CDNs, so a private tile server alone does **not** make the GUI offline-capable — without Leaflet the map is a blank box. `utils/map_assets.use_local_assets()` repoints folium at `static/vendor/` and drops the four unused ones; `gui.local_map_assets` turns it on. The URLs are read out of `folium.Map`/`Draw.default_js`/`default_css`, never hardcoded, so a folium bump is picked up by re-running `scripts/vendor_map_assets.py`.
+
+- `GUI__MAP_TILES` cannot work, despite the "any key is overridable" rule: `_coerce` (`utils/config.py`) splits a list env var on commas and coerces each item against `existing[0]`, which for `map_tiles` is a dict — so you get strings and `t["name"]` raises. Edit/mount the YAML instead. (The GUI also loads config with plain `yaml.safe_load`, not `utils.config`, so `GUI__*` overrides don't reach it at all — `local_map_assets` reads its env var by hand.)
 
 - pandas 3 stores a column of strings as `str` dtype, so a `None` you assign comes back as **NaN**, not None. Assert with `pd.isna(...)`, and treat "is it a string?" as the reliable null test for WKT columns (`utils.overrides.manual_outline`).
 

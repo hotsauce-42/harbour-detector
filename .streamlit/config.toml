@@ -1,0 +1,7 @@
+# Streamlit settings for the GUI (app.py). Checked in; secrets.toml is not.
+
+[server]
+# Serves ./static/ at /app/static/ — how the vendored Leaflet assets
+# (scripts/vendor_map_assets.py) reach the browser when gui.local_map_assets
+# is on. Harmless when the directory is empty.
+enableStaticServing = true

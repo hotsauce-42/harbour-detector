@@ -6,6 +6,7 @@ run in the normal pytest sweep alongside the pipeline tests.
 """
 
 import json
+import re
 from pathlib import Path
 
 import h3
@@ -24,6 +25,7 @@ from shapely.wkt import loads as from_wkt
 from streamlit.testing.v1 import AppTest
 
 import app
+from utils import map_assets
 from utils.geo import merge_outlines
 
 RES = 11
@@ -593,3 +595,85 @@ def test_revert_is_offered_for_a_harbour_with_a_manual_outline(outputs):
     assert not at.exception
     # The toggle's own label doubles as the "this harbour was edited" marker.
     assert "manually adjusted" in at.toggle(key="outline_mode_DE-abcd1234").label
+
+
+# ── Offline map assets ─────────────────────────────────────────────────────
+
+CDN_HOSTS = ("cdn.jsdelivr.net", "cdnjs.cloudflare.com",
+             "code.jquery.com", "netdna.bootstrapcdn.com")
+
+
+@pytest.fixture
+def folium_assets_restored():
+    """use_local_assets() mutates folium's classes — put them back afterwards."""
+    saved = [(cls, attr, list(getattr(cls, attr)))
+             for cls in map_assets._HOLDERS for attr in map_assets._ATTRS]
+    yield
+    for cls, attr, value in saved:
+        setattr(cls, attr, value)
+
+
+def _page(feat, **kwargs) -> str:
+    """The whole HTML document, <head> included — where the assets are linked."""
+    m = app._build_map(feat, "http://mapserver.internal/{z}/{x}/{y}.png", "attr",
+                       "tiles", **kwargs)
+    return m.get_root().render()
+
+
+def test_the_default_map_still_comes_from_the_cdns(outputs):
+    """Guards the premise: without opting in, nothing about the map changes."""
+    feats = app.load_features.__wrapped__(str(outputs / "harbours.geojson"))
+    page = _page(feats[0], editable=True)
+    assert any(host in page for host in CDN_HOSTS)
+
+
+def test_local_assets_leave_no_external_request_but_the_tiles(
+    outputs, folium_assets_restored
+):
+    """
+    The point of the whole exercise: in a sealed network the only host the map
+    reaches for is the operator's own tile server.
+    """
+    map_assets.use_local_assets()
+    feats = app.load_features.__wrapped__(str(outputs / "harbours.geojson"))
+    page = _page(feats[0], editable=True)
+
+    urls = set(re.findall(r"https?://[^\"' )]+", page))
+    assert urls == {"http://mapserver.internal/{z}/{x}/{y}.png"}
+    # Leaflet.Draw is the editor — a blank map would be the silent failure here.
+    assert "/app/static/vendor/leaflet.draw.js" in page
+    assert "L.Control.Draw" in page
+
+
+def test_local_assets_survive_a_streamlit_rerun(folium_assets_restored):
+    """Streamlit re-runs the script on every interaction, so it runs repeatedly."""
+    map_assets.use_local_assets()
+    once = map_assets.asset_urls()
+    map_assets.use_local_assets()
+
+    assert map_assets.asset_urls() == once
+
+
+def test_every_kept_asset_still_exists_in_folium():
+    """
+    A folium upgrade that renames a key would silently drop it from the page
+    instead of vendoring it — the map would then need the CDN after all.
+    """
+    assert set(map_assets.asset_urls()) == set(map_assets.KEEP)
+    assert set(map_assets.SUB_ASSETS) <= set(map_assets.KEEP)
+
+
+def test_a_custom_asset_host_is_used_verbatim(folium_assets_restored):
+    app._apply_map_assets({
+        "local_map_assets": True,
+        "map_assets_url":   "https://maps.internal/leaflet",
+    })
+    assert map_assets.asset_urls()["leaflet_draw_js"] == (
+        "https://maps.internal/leaflet/leaflet.draw.js"
+    )
+
+
+def test_assets_are_left_alone_when_the_flag_is_off(folium_assets_restored):
+    before = map_assets.asset_urls()
+    app._apply_map_assets({})
+    assert map_assets.asset_urls() == before

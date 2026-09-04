@@ -31,6 +31,7 @@ from shapely.wkt import loads as from_wkt
 from streamlit_folium import st_folium
 
 from utils.geo import clean_polygon, merge_outlines
+from utils.map_assets import VENDOR_URL, is_vendored, use_local_assets
 from utils.overrides import (
     DETECTED_OUTLINE_KEY,
     EDITABLE_FIELDS,
@@ -52,6 +53,30 @@ CONFIG_PATH = Path("config/settings.yaml")
 def load_config() -> dict:
     with open(CONFIG_PATH) as f:
         return yaml.safe_load(f)
+
+
+def _apply_map_assets(gui_cfg: dict) -> None:
+    """
+    Switch Leaflet from the public CDNs to a local copy, when configured.
+
+    `gui.local_map_assets` (or GUI__LOCAL_MAP_ASSETS) turns it on;
+    `gui.map_assets_url` points at somewhere other than this app's own
+    static/ directory — e.g. the same web server that serves the tiles.
+    """
+    env = os.getenv("GUI__LOCAL_MAP_ASSETS")
+    enabled = (env.strip().lower() in ("true", "1", "yes") if env is not None
+               else bool(gui_cfg.get("local_map_assets", False)))
+    if not enabled:
+        return
+
+    base_url = gui_cfg.get("map_assets_url", VENDOR_URL)
+    use_local_assets(base_url)
+    # Only static/vendor/ is ours to check; another host we cannot see from here.
+    if base_url == VENDOR_URL and not is_vendored():
+        st.sidebar.warning(
+            "Local map assets are enabled but `static/vendor/` is incomplete — "
+            "the map will not render. Run `python3 scripts/vendor_map_assets.py`."
+        )
 
 
 @st.cache_data(show_spinner="Loading harbour data …")
@@ -698,6 +723,7 @@ def main() -> None:
 
     cfg     = load_config()
     gui_cfg = cfg.get("gui", {})
+    _apply_map_assets(gui_cfg)
 
     output_file = gui_cfg.get("output_file", "data/output/harbours.geojson")
     cells_file  = _cells_path(output_file, gui_cfg)

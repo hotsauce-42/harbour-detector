@@ -34,8 +34,12 @@ data/output/harbours.parquet
 !data/interim/.gitkeep
 !data/reference/.gitkeep
 
-# Streamlit
-.streamlit/
+# Streamlit — config.toml is part of the app; secrets.toml must never be
+.streamlit/*
+!.streamlit/config.toml
+
+# Vendored Leaflet assets — downloaded by scripts/vendor_map_assets.py
+#static/vendor/
 
 # Pytest
 .pytest_cache/

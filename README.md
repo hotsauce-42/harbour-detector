@@ -168,6 +168,8 @@ Leave all four YAML fields blank and set the standard AWS env vars instead. This
 | `cells_file` | `data/output/harbours_cells.geojson` | H3-cell geometry behind the map's **H3 cells** / **Both** toggle. Defaults to `output_file` with a `_cells` suffix; if the file is absent the GUI shows outlines only. |
 | `default_tile` | `OpenStreetMap` | Which tile layer is selected on startup |
 | `map_tiles` | (4 built-in layers) | List of `{name, url, attribution}` tile server definitions |
+| `local_map_assets` | `false` | Load Leaflet from `static/vendor/` instead of the public CDNs — see [Offline / air-gapped use](#offline--air-gapped-use) |
+| `map_assets_url` | `/app/static/vendor` | Where those files are served from, if not this app's own `static/` directory |
 
 To add a custom tile server, append to `map_tiles`:
 
@@ -177,6 +179,39 @@ map_tiles:
     url: "https://mytiles.example.com/{z}/{x}/{y}.png"
     attribution: "© My Company"
 ```
+
+### Offline / air-gapped use
+
+The GUI reaches the internet in two independent ways, and both have to be dealt
+with — a private tile server on its own is not enough.
+
+**1. Tiles.** Replace the four public entries in `map_tiles` with your own
+server. Leaving them in place costs a DNS timeout each time one is selected.
+
+**2. Leaflet itself.** folium's page loads six libraries from four public CDNs.
+Offline, none of them arrive and the map is a blank box — `leaflet.draw` among
+them, which is the outline editor. Download the two that this app actually uses
+(the other four are unreferenced and get dropped):
+
+```bash
+python3 scripts/vendor_map_assets.py          # → static/vendor/, needs internet
+```
+
+Then turn it on:
+
+```yaml
+gui:
+  local_map_assets: true       # or GUI__LOCAL_MAP_ASSETS=true
+```
+
+Streamlit serves `static/` at `/app/static/` — already enabled in
+`.streamlit/config.toml`. `static/vendor/` is gitignored, so on a sealed
+network run the script on a connected machine and copy the directory across (or
+run it during an image build). Set `map_assets_url` instead to serve the files
+from another host, e.g. the web server that already serves your tiles.
+
+Versions come from folium, so a folium upgrade is picked up by re-running the
+script — no URLs to edit by hand.
 
 ---
 
