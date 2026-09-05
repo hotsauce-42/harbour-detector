@@ -33,7 +33,7 @@ import pyarrow.parquet as pq
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from utils.gazetteer import GAZETTEER_SCHEMA, is_settlement  # noqa: E402
+from utils.gazetteer import DEFUNCT_CODES, GAZETTEER_SCHEMA  # noqa: E402
 
 GN_URL = "https://download.geonames.org/export/dump/"
 DEFAULT_OUT = Path("data/reference/geonames/places.parquet")
@@ -42,13 +42,18 @@ DEFAULT_OUT = Path("data/reference/geonames/places.parquet")
 COL_NAME, COL_LAT, COL_LON = 1, 4, 5
 COL_FEATURE_CLASS, COL_FEATURE_CODE, COL_CC = 6, 7, 8
 COL_ADMIN1_CODE, COL_POPULATION = 10, 14
+COL_ADMIN2_CODE, COL_ADMIN3_CODE, COL_ADMIN4_CODE = 11, 12, 13
 
 # Feature class P is "city, village, ..." — every populated place, which is the
-# whole point. A, H, T, ... are regions, water bodies and landforms. A few of
-# P's own codes are dropped as well (unpopulated city districts, abandoned
-# places) — see `is_settlement`. Gazetteer applies the same rule on load, so an
-# older file is corrected without a rebuild; doing it here keeps the file ~218k
-# rows smaller.
+# whole point. A, H, T, ... are regions, water bodies and landforms.
+#
+# Only the defunct codes are dropped here. Unpopulated city districts are *kept*
+# even though `Gazetteer` will not name a harbour after one: they carry the
+# administrative codes that say which municipality a stretch of water belongs
+# to, and they are often the only row that does. The harbour at Kiel-Holtenau
+# reaches Kiel through the district "Holtenau"; the nearest place that survives
+# filtering, Knoop, is in another Kreis entirely. Gazetteer applies the rest of
+# the filtering on load, where the districts have already served their purpose.
 FEATURE_CLASS = "P"
 
 BATCH_ROWS = 250_000
@@ -120,7 +125,7 @@ def _rows(source: Path, countries: set[str], admin1: dict[str, str]):
                 population = int(row[COL_POPULATION] or 0)
             except ValueError:
                 continue
-            if not is_settlement(row[COL_FEATURE_CODE], population):
+            if row[COL_FEATURE_CODE] in DEFUNCT_CODES:
                 continue
             yield {
                 "name":         row[COL_NAME],
@@ -130,6 +135,11 @@ def _rows(source: Path, countries: set[str], admin1: dict[str, str]):
                 "feature_code": row[COL_FEATURE_CODE],
                 "cc":           cc,
                 "admin1":       admin1.get(f"{cc}.{row[COL_ADMIN1_CODE]}", ""),
+                # Raw codes, not names: they are only ever compared with each
+                # other, to ask whether two places share a municipality.
+                "admin2":       row[COL_ADMIN2_CODE],
+                "admin3":       row[COL_ADMIN3_CODE],
+                "admin4":       row[COL_ADMIN4_CODE],
             }
 
 

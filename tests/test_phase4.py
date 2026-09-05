@@ -267,6 +267,9 @@ def test_no_tiers_means_no_floor():
 
 
 def _write_gazetteer(path, places) -> None:
+    """Rows may omit the trailing admin2/3/4 codes; they are padded with ''."""
+    width = len(GAZETTEER_SCHEMA)
+    places = [tuple(p) + ("",) * (width - len(p)) for p in places]
     columns = list(zip(*places))
     pq.write_table(pa.table({
         field.name: pa.array(list(values), type=field.type)
@@ -423,3 +426,148 @@ def test_a_missing_gazetteer_still_produces_a_country(tmp_path):
     )
     assert result.iloc[0]["country_iso2"] == "DE"
     assert result.iloc[0]["country_name"] == "Germany"
+
+
+# ---------------------------------------------------------------------------
+# A port belongs to its city
+# ---------------------------------------------------------------------------
+
+# Rostock's Überseehafen: 0.6 km from Petersdorf (a hamlet with no recorded
+# population and no connection to Rostock) and 7.5 km from Rostock itself.
+PORT_LAT, PORT_LON = 54.15499, 12.12169
+
+
+def _port_city_config(path, **kwargs) -> Phase4Config:
+    return Phase4Config(interim_dir="", gazetteer_path=str(path), **kwargs)
+
+
+def test_a_port_is_named_after_its_city_not_the_hamlet_at_the_quay(tmp_path):
+    path = tmp_path / "places.parquet"
+    _write_gazetteer(path, [
+        ("Petersdorf", PORT_LAT + 0.006, PORT_LON,      0, "PPL",   "DE", "MV"),
+        ("Rostock",    PORT_LAT - 0.067, PORT_LON, 198293, "PPLA3", "DE", "MV"),
+    ])
+    df = _make_clusters_df([_cluster_row(0, PORT_LAT, PORT_LON)])
+
+    result = _add_geocoding(df, _port_city_config(path))
+
+    assert result.iloc[0]["nearest_city"] == "Rostock"
+
+
+def test_a_place_with_a_population_keeps_its_own_name(tmp_path):
+    """
+    Warnemünde is 0.8 km from its quay and GeoNames counts 8,441 people there.
+    The rule triggers on *unpopulated* hamlets only, so a named place survives
+    a city sitting well inside the radius.
+    """
+    path = tmp_path / "places.parquet"
+    _write_gazetteer(path, [
+        ("Warnemünde", PORT_LAT + 0.006, PORT_LON,   8441, "PPL",   "DE", "MV"),
+        ("Rostock",    PORT_LAT - 0.067, PORT_LON, 198293, "PPLA3", "DE", "MV"),
+    ])
+    df = _make_clusters_df([_cluster_row(0, PORT_LAT, PORT_LON)])
+
+    result = _add_geocoding(df, _port_city_config(path))
+
+    assert result.iloc[0]["nearest_city"] == "Warnemünde"
+
+
+def test_the_city_must_be_in_the_same_country(tmp_path):
+    """
+    At Helsingør the nearest big seat is Helsingborg, across the Øresund in
+    Sweden. A harbour must not be named after a city in another country.
+    """
+    path = tmp_path / "places.parquet"
+    _write_gazetteer(path, [
+        ("Hamlet",      PORT_LAT + 0.006, PORT_LON,      0, "PPL",  "DE", "MV"),
+        ("Foreign City", PORT_LAT - 0.04, PORT_LON, 140000, "PPLA", "SE", "Skåne"),
+    ])
+    df = _make_clusters_df([_cluster_row(0, PORT_LAT, PORT_LON)])
+
+    result = _add_geocoding(df, _port_city_config(path))
+
+    assert result.iloc[0]["nearest_city"] == "Hamlet"
+
+
+def test_only_an_administrative_seat_can_take_over(tmp_path):
+    """
+    GeoNames population is not always trustworthy — a plain PPL near
+    Karrebæksminde carries 53,443. Requiring PPLA*/PPLC keeps those out.
+    """
+    path = tmp_path / "places.parquet"
+    _write_gazetteer(path, [
+        ("Hamlet",  PORT_LAT + 0.006, PORT_LON,     0, "PPL", "DE", "MV"),
+        ("Not A Seat", PORT_LAT - 0.04, PORT_LON, 53443, "PPL", "DE", "MV"),
+    ])
+    df = _make_clusters_df([_cluster_row(0, PORT_LAT, PORT_LON)])
+
+    result = _add_geocoding(df, _port_city_config(path))
+
+    assert result.iloc[0]["nearest_city"] == "Hamlet"
+
+
+def test_an_island_harbour_keeps_its_village(tmp_path):
+    """
+    Anholt: the nearest city is 51 km away. Nothing within the radius means
+    nothing changes — this rule must not undo the reason the gazetteer exists.
+    """
+    path = tmp_path / "places.parquet"
+    _write_gazetteer(path, [
+        ("Anholt",  PORT_LAT + 0.02, PORT_LON,      0, "PPL",   "DE", "MV"),
+        ("Far City", PORT_LAT + 0.46, PORT_LON, 198293, "PPLA3", "DE", "MV"),
+    ])
+    df = _make_clusters_df([_cluster_row(0, PORT_LAT, PORT_LON)])
+
+    result = _add_geocoding(df, _port_city_config(path))
+
+    assert result.iloc[0]["nearest_city"] == "Anholt"
+
+
+def test_the_port_city_rule_can_be_switched_off(tmp_path):
+    path = tmp_path / "places.parquet"
+    _write_gazetteer(path, [
+        ("Petersdorf", PORT_LAT + 0.006, PORT_LON,      0, "PPL",   "DE", "MV"),
+        ("Rostock",    PORT_LAT - 0.067, PORT_LON, 198293, "PPLA3", "DE", "MV"),
+    ])
+    df = _make_clusters_df([_cluster_row(0, PORT_LAT, PORT_LON)])
+
+    result = _add_geocoding(df, _port_city_config(path, port_city_max_km=0.0))
+
+    assert result.iloc[0]["nearest_city"] == "Petersdorf"
+
+
+def test_the_city_must_be_the_harbours_own_municipality(tmp_path):
+    """
+    The guard on the port-city rule. Hellerup is 4.6 km from Copenhagen but in
+    Gentofte kommune; naming its harbour Copenhagen is exactly the overreach
+    distance alone cannot see. Measured over 28 candidate overrides on real
+    data, this confirmed 22 and rejected 6.
+    """
+    path = tmp_path / "places.parquet"
+    _write_gazetteer(path, [
+        ("Hamlet", PORT_LAT + 0.006, PORT_LON,      0, "PPL",   "DE",
+         "MV", "00", "13003", "13003999"),
+        ("Rostock", PORT_LAT - 0.067, PORT_LON, 198293, "PPLA3", "DE",
+         "MV", "00", "13003", "13003000"),
+    ])
+    df = _make_clusters_df([_cluster_row(0, PORT_LAT, PORT_LON)])
+
+    result = _add_geocoding(df, _port_city_config(path))
+
+    assert result.iloc[0]["nearest_city"] == "Hamlet"
+
+
+def test_the_city_wins_when_the_municipality_agrees(tmp_path):
+    """The same fixture with matching codes — Petersdorf really is in Rostock."""
+    path = tmp_path / "places.parquet"
+    _write_gazetteer(path, [
+        ("Petersdorf", PORT_LAT + 0.006, PORT_LON,      0, "PPL",   "DE",
+         "MV", "00", "13003", "13003000"),
+        ("Rostock",    PORT_LAT - 0.067, PORT_LON, 198293, "PPLA3", "DE",
+         "MV", "00", "13003", "13003000"),
+    ])
+    df = _make_clusters_df([_cluster_row(0, PORT_LAT, PORT_LON)])
+
+    result = _add_geocoding(df, _port_city_config(path))
+
+    assert result.iloc[0]["nearest_city"] == "Rostock"

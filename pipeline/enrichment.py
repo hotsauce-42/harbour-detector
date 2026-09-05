@@ -86,6 +86,13 @@ class Phase4Config:
     # Past this, a tier's floor is dropped and the nearest place of any size
     # wins — better a nearby village than a city on the far side of a bay.
     max_city_dist_km: float = 50.0
+    # A port belongs to its city: when the nearest place is a hamlet GeoNames
+    # records no inhabitants for, prefer an administrative seat of at least
+    # port_city_min_population within port_city_max_km, in the same country.
+    # 0 km switches the rule off.
+    port_city_max_km: float = 8.0
+    port_city_min_population: int = 50_000
+    port_city_max_hamlet_population: int = 0
     # Outline generation — see utils.geo.outline_polygon
     outline_buffer_meters: float = 75.0
     outline_simplify_meters: float = 0.0
@@ -101,6 +108,13 @@ class Phase4Config:
             city_population_tiers=p4.get("city_population_tiers",
                                          DEFAULT_CITY_TIERS),
             max_city_dist_km=float(p4.get("max_city_dist_km", 50.0)),
+            port_city_max_km=float(p4.get("port_city_max_km", 8.0)),
+            port_city_min_population=int(
+                p4.get("port_city_min_population", 50_000)
+            ),
+            port_city_max_hamlet_population=int(
+                p4.get("port_city_max_hamlet_population", 0)
+            ),
             outline_buffer_meters=p4.get("outline_buffer_meters", 75.0),
             outline_simplify_meters=p4.get("outline_simplify_meters", 0.0),
             outline_fill_holes=p4.get("outline_fill_holes", True),
@@ -236,6 +250,7 @@ def _add_geocoding(clusters: pd.DataFrame, config: Phase4Config) -> pd.DataFrame
 
     n_floored = 0
     n_rg_country = 0
+    n_port_city = 0
     for (clat, clon), r, n_cells in zip(coords, results, clusters["n_cells"]):
         # Country comes from the *nearest* place, never the population-floored
         # city below: a floor can select a town tens of km away, and that town
@@ -261,6 +276,26 @@ def _add_geocoding(clusters: pd.DataFrame, config: Phase4Config) -> pd.DataFrame
             place = country_place if country_place is not None else place
         elif floor > 0:
             n_floored += 1
+
+        # A port belongs to its city. When the nearest place is a hamlet
+        # GeoNames records no inhabitants for, it is usually not what the
+        # harbour is called: Rostock's Überseehafen is 0.6 km from Petersdorf
+        # (population 0, and nothing to do with Rostock) and 7.5 km from
+        # Rostock itself. A named place — Warnemünde at 8,441 — is left alone.
+        if (place is not None
+                and config.port_city_max_km > 0
+                and place.population <= config.port_city_max_hamlet_population):
+            city = gazetteer.nearest_seat(
+                clat, clon, config.port_city_min_population,
+                config.port_city_max_km, iso2,
+            )
+            # …but only when the harbour is actually in that city's
+            # municipality. Distance alone would hand Hellerup to Copenhagen
+            # (Gentofte kommune) and Sandwig to Flensburg (Glücksburg).
+            if (city is not None and city.name != place.name
+                    and gazetteer.shares_municipality(clat, clon, city)):
+                place = city
+                n_port_city += 1
 
         if place is None:
             # Nothing in the gazetteer at all — keep the columns aligned.
@@ -288,6 +323,9 @@ def _add_geocoding(clusters: pd.DataFrame, config: Phase4Config) -> pd.DataFrame
     if n_floored:
         logger.info("  %d harbour(s) large enough to require a populated city",
                     n_floored)
+    if n_port_city:
+        logger.info("  %d harbour(s) named after their city rather than an "
+                    "unpopulated hamlet nearer the quay", n_port_city)
     if n_rg_country:
         logger.warning(
             "  %d harbour(s) had no gazetteer place within %.0f km — country "

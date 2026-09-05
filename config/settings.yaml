@@ -107,6 +107,21 @@ phase4:
   # better a village next door than a city on the far side of a bay.
   max_city_dist_km: 50
 
+  # A port belongs to its city. When the nearest place is a hamlet GeoNames
+  # records no inhabitants for, prefer a nearby administrative seat instead:
+  # Rostock's Überseehafen sits 0.6 km from Petersdorf (population 0, and
+  # nothing to do with Rostock) and 7.5 km from Rostock. Only PPLA*/PPLC seats
+  # in the harbour's own country qualify, which keeps out both a mis-populated
+  # village and a city across a national strait.
+  # 8 km is deliberately under the 10.8 km from the Warnemünde quays to
+  # Rostock, so a place that has a name of its own keeps it.
+  # Set port_city_max_km to 0 to switch the rule off.
+  port_city_max_km: 8
+  port_city_min_population: 50000
+  # "No recorded population" is the trigger — raise it to let the rule reach
+  # places GeoNames does count people in.
+  port_city_max_hamlet_population: 0
+
   # Harbour outline — the H3-cell union morphologically closed (dilated then
   # eroded) so the gaps between berths close and the interior holes left by
   # untrafficked cells disappear. Exported as harbours.geojson; the exact cell

@@ -47,7 +47,19 @@ GAZETTEER_SCHEMA = pa.schema([
     pa.field("feature_code", pa.string()),
     pa.field("cc", pa.string()),
     pa.field("admin1", pa.string()),
+    # Administrative division codes, finest first when present. Used only to
+    # answer "is this place in that city's municipality?" — see
+    # municipality_key(). GeoNames fills them unevenly: Germany goes down to
+    # admin4 (Gemeinde), Denmark stops at admin2 (kommune), and plenty of rows
+    # have none at all.
+    pa.field("admin2", pa.string()),
+    pa.field("admin3", pa.string()),
+    pa.field("admin4", pa.string()),
 ])
+
+# Finest administrative division first: the smallest one a place has is the
+# municipality it belongs to.
+ADMIN_CODE_FIELDS = ("admin4", "admin3", "admin2")
 
 # GeoNames codes for capitals and administrative seats. A regional seat is a
 # significant place whatever its headcount, so it clears any population floor —
@@ -140,6 +152,73 @@ def _great_circle_km(chord_km: float) -> float:
     return 2.0 * EARTH_RADIUS_KM * float(np.arcsin(ratio))
 
 
+def _chord_km(great_circle_km: float) -> float:
+    """The inverse: a distance along the sphere → the straight-line chord.
+
+    Radius queries run against the ECEF tree, whose metric is the chord.
+    """
+    return 2.0 * EARTH_RADIUS_KM * float(
+        np.sin(great_circle_km / (2.0 * EARTH_RADIUS_KM))
+    )
+
+
+class _AdminIndex:
+    """
+    Which municipality is a point in, and which municipality is a place in?
+
+    Kept over *every* row of the gazetteer, districts included, because the
+    dropped ones are often the only thing carrying the answer: the harbour at
+    Kiel-Holtenau reaches Kiel through the PPLX "Holtenau", while the nearest
+    surviving place, Knoop, sits in a different Kreis.
+
+    Inactive — every lookup returns None — when the file has no division codes,
+    which is the case for the bundled cities1000 dataset and for any gazetteer
+    prepared before those columns existed.
+    """
+
+    def __init__(self, table: pa.Table) -> None:
+        columns = {f: (table.column(f).to_pylist()
+                       if f in table.schema.names else None)
+                   for f in ADMIN_CODE_FIELDS}
+        self.active = any(
+            any(v for v in values) for values in columns.values() if values
+        )
+        if not self.active:
+            self._keys: list[tuple | None] = []
+            self._tree = None
+            return
+
+        ccs = table.column("cc").to_pylist()
+        admin1 = table.column("admin1").to_pylist()
+        self._keys = [
+            self._key(ccs[i], admin1[i], {f: (columns[f][i] if columns[f] else "")
+                                          for f in ADMIN_CODE_FIELDS})
+            for i in range(table.num_rows)
+        ]
+        points = _to_ecef(table.column("lat").to_numpy(),
+                          table.column("lon").to_numpy())
+        self._tree = cKDTree(points) if len(points) else None
+
+    @staticmethod
+    def _key(cc: str, admin1: str, codes: dict[str, str]) -> tuple | None:
+        """The finest division a place belongs to, or None if it has none."""
+        for field in ADMIN_CODE_FIELDS:
+            if codes.get(field):
+                return (cc, admin1, field, codes[field])
+        return None
+
+    def key_at(self, lat: float, lon: float) -> tuple | None:
+        """The municipality of the place nearest to a point."""
+        if self._tree is None:
+            return None
+        _, position = self._tree.query(_to_ecef(np.array([lat]), np.array([lon])), k=1)
+        return self._keys[int(position[0])]
+
+    def key_of(self, place: "Place") -> tuple | None:
+        """The municipality of a place already found, matched on its position."""
+        return self.key_at(place.lat, place.lon)
+
+
 class Gazetteer:
     """
     An in-memory index of populated places, queried by nearest great-circle.
@@ -149,6 +228,11 @@ class Gazetteer:
     """
 
     def __init__(self, table: pa.Table, has_population: bool = True) -> None:
+        # Municipality lookups run against every row, *including* the districts
+        # dropped below. Kiel is only reachable through Holtenau — a PPLX with
+        # no population — because the nearest surviving place, Knoop, is in a
+        # different Kreis altogether.
+        self._admin = _AdminIndex(table)
         table = drop_overshadowed_districts(drop_non_settlements(table))
         self._names = table.column("name").to_pylist()
         self._codes = table.column("feature_code").to_pylist()
@@ -161,6 +245,7 @@ class Gazetteer:
 
         self._points = _to_ecef(self._lat, self._lon)
         self._trees: dict[int, tuple[cKDTree, np.ndarray] | None] = {}
+        self._seat_trees: dict[int, tuple[cKDTree, np.ndarray] | None] = {}
 
     def __len__(self) -> int:
         return len(self._names)
@@ -195,9 +280,16 @@ class Gazetteer:
             ]
         filesystem = (get_s3_filesystem(s3_cfg or {})
                       if is_s3_path(str(path)) else None)
-        table = pq.read_table(str(path), columns=GAZETTEER_SCHEMA.names,
-                              filters=filters, filesystem=filesystem)
-        return cls(table)
+        # Only the columns the file actually has: admin2/3/4 were added later,
+        # and a gazetteer prepared before that must keep working — it simply
+        # cannot answer municipality questions. Rebuilding means downloading
+        # 421 MB again, which is not a thing to require for an upgrade.
+        present = set(pq.read_schema(str(path), filesystem=filesystem).names)
+        table = pq.read_table(
+            str(path), columns=[n for n in GAZETTEER_SCHEMA.names if n in present],
+            filters=filters, filesystem=filesystem,
+        )
+        return cls(_with_missing_columns(table))
 
     @classmethod
     def bundled(cls) -> "Gazetteer":
@@ -231,6 +323,11 @@ class Gazetteer:
             "feature_code": pa.array([""] * len(names), type=pa.string()),
             "cc": pa.array(ccs, type=pa.string()),
             "admin1": pa.array(admin1, type=pa.string()),
+            # cities1000 carries no division codes, so the municipality veto is
+            # simply inactive on the fallback dataset.
+            "admin2": pa.array([""] * len(names), type=pa.string()),
+            "admin3": pa.array([""] * len(names), type=pa.string()),
+            "admin4": pa.array([""] * len(names), type=pa.string()),
         }, schema=GAZETTEER_SCHEMA)
         return cls(table, has_population=False)
 
@@ -293,6 +390,9 @@ class Gazetteer:
         chord, position = tree.query(point, k=1)
         i = int(indices[int(position[0])])
 
+        return self._place(i, float(chord[0]))
+
+    def _place(self, i: int, chord_km: float) -> Place:
         return Place(
             name=self._names[i],
             lat=float(self._lat[i]),
@@ -301,8 +401,101 @@ class Gazetteer:
             feature_code=self._codes[i],
             cc=self._ccs[i],
             admin1=self._admin1[i],
-            distance_km=_great_circle_km(float(chord[0])),
+            distance_km=_great_circle_km(chord_km),
         )
+
+    @property
+    def has_municipalities(self) -> bool:
+        """False when the source carries no administrative division codes."""
+        return self._admin.active
+
+    def shares_municipality(self, lat: float, lon: float, place: Place) -> bool:
+        """
+        Is the point in the same municipality as `place`?
+
+        The guard on `nearest_seat`: a big city close to a harbour is not
+        necessarily the city the harbour belongs to. Hellerup lies 4.6 km from
+        Copenhagen but in Gentofte kommune, Sandwig 7.9 km from Flensburg but
+        in Glücksburg — while Petersdorf really is inside Rostock and Holtenau
+        inside Kiel. Measured over 28 candidate overrides, this confirmed 22
+        and rejected 6, every rejection a correction.
+
+        Returns True when the gazetteer has no division codes, so an older file
+        keeps the un-guarded behaviour rather than losing the feature.
+        """
+        if not self._admin.active:
+            return True
+        here = self._admin.key_at(lat, lon)
+        return here is not None and here == self._admin.key_of(place)
+
+    def _seat_tree_for(self, min_population: int):
+        """(tree, index map) over administrative seats of at least a size."""
+        if min_population not in self._seat_trees:
+            indices = np.flatnonzero(
+                np.array([c in SEAT_CODES for c in self._codes], dtype=bool)
+                & (self._population >= min_population)
+            )
+            self._seat_trees[min_population] = (
+                (cKDTree(self._points[indices]), indices) if len(indices) else None
+            )
+        return self._seat_trees[min_population]
+
+    def nearest_seat(
+        self,
+        lat: float,
+        lon: float,
+        min_population: int,
+        max_km: float,
+        cc: str | None = None,
+    ) -> Place | None:
+        """
+        The nearest administrative seat of at least `min_population` within
+        `max_km`, optionally restricted to one country.
+
+        This is how a port gets named after the city it belongs to rather than
+        the nameless hamlet nearest the quay: Rostock's Überseehafen is 0.6 km
+        from Petersdorf (population 0) and 7.5 km from Rostock.
+
+        A radius search rather than a nearest-neighbour one, because the country
+        filter has to be applied *before* choosing: at Helsingør the closest
+        large seat is Helsingborg, across the Øresund in Sweden, and a `k=1`
+        query would return it and then have to give up rather than looking for
+        the Danish one behind it.
+        """
+        found = self._seat_tree_for(min_population)
+        if found is None or max_km <= 0:
+            return None
+
+        tree, indices = found
+        point = _to_ecef(np.array([lat]), np.array([lon]))[0]
+        within = tree.query_ball_point(point, _chord_km(max_km))
+        if not within:
+            return None
+
+        best, best_chord = None, None
+        for position in within:
+            i = int(indices[position])
+            if cc and self._ccs[i] != cc:
+                continue
+            chord = float(np.linalg.norm(self._points[i] - point))
+            if best_chord is None or chord < best_chord:
+                best, best_chord = i, chord
+
+        return None if best is None else self._place(best, best_chord)
+
+
+def _with_missing_columns(table: pa.Table) -> pa.Table:
+    """Pad a table up to GAZETTEER_SCHEMA, filling absent columns with ''.
+
+    Lets a gazetteer built before a column existed load unchanged; the features
+    that need it simply stay inactive.
+    """
+    for field in GAZETTEER_SCHEMA:
+        if field.name not in table.schema.names:
+            table = table.append_column(
+                field, pa.array([""] * table.num_rows, type=field.type)
+            )
+    return table.select(GAZETTEER_SCHEMA.names)
 
 
 def is_settlement(feature_code: str, population: int) -> bool:

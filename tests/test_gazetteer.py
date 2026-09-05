@@ -11,6 +11,8 @@ import pytest
 
 from utils.gazetteer import (
     DEFUNCT_CODES,
+    _chord_km,
+    _great_circle_km,
     DISTRICT_ISOLATION_KM,
     GAZETTEER_SCHEMA,
     Gazetteer,
@@ -24,8 +26,14 @@ NORTH = 56.0
 
 
 def _gazetteer(places: list[tuple], has_population: bool = True) -> Gazetteer:
-    """places: (name, lat, lon, population, feature_code, cc, admin1)"""
-    columns = list(zip(*places)) if places else [()] * 7
+    """
+    places: (name, lat, lon, population, feature_code, cc, admin1) and
+    optionally (admin2, admin3, admin4). Short rows are padded, so a test only
+    spells out the division codes when it is actually about municipalities.
+    """
+    width = len(GAZETTEER_SCHEMA)
+    places = [tuple(p) + ("",) * (width - len(p)) for p in places]
+    columns = list(zip(*places)) if places else [()] * width
     table = pa.table({
         field.name: pa.array(list(values), type=field.type)
         for field, values in zip(GAZETTEER_SCHEMA, columns)
@@ -201,6 +209,8 @@ def test_ordinary_small_places_survive_the_filter():
 # ── Loading ────────────────────────────────────────────────────────────────
 
 def _write_places(path, places) -> None:
+    width = len(GAZETTEER_SCHEMA)
+    places = [tuple(p) + ("",) * (width - len(p)) for p in places]
     columns = list(zip(*places))
     pq.write_table(pa.table({
         field.name: pa.array(list(values), type=field.type)
@@ -257,3 +267,120 @@ def test_bbox_grows_the_extent_by_the_margin():
 
 def test_bbox_of_nothing_is_no_filter():
     assert bbox_around([], []) is None
+
+
+# ── Nearest administrative seat ────────────────────────────────────────────
+
+def test_nearest_seat_ignores_a_bigger_place_that_is_not_a_seat():
+    """Population alone is not enough — GeoNames records some odd ones."""
+    gz = _gazetteer([
+        ("Big Village", 55.05, 10.0, 90000, "PPL",   "DK", "R"),
+        ("County Town", 55.10, 10.0, 60000, "PPLA2", "DK", "R"),
+    ])
+    assert gz.nearest_seat(55.0, 10.0, 50000, 20.0).name == "County Town"
+
+
+def test_nearest_seat_respects_the_radius():
+    gz = _gazetteer([("Town", 55.20, 10.0, 60000, "PPLA2", "DK", "R")])
+    assert gz.nearest_seat(55.0, 10.0, 50000, 30.0) is not None
+    assert gz.nearest_seat(55.0, 10.0, 50000, 5.0) is None
+
+
+def test_nearest_seat_respects_the_population_floor():
+    gz = _gazetteer([("Small Seat", 55.01, 10.0, 900, "PPLA2", "DK", "R")])
+    assert gz.nearest_seat(55.0, 10.0, 50000, 20.0) is None
+    assert gz.nearest_seat(55.0, 10.0, 500, 20.0).name == "Small Seat"
+
+
+def test_nearest_seat_skips_past_a_closer_foreign_city():
+    """
+    The Øresund. A k=1 query would hit Helsingborg and give up; the radius
+    search has to look behind it for the Danish seat.
+    """
+    gz = _gazetteer([
+        ("Helsingborg", 56.045, 12.694, 140000, "PPLA",  "SE", "Skåne"),
+        ("Helsingør",   56.036, 12.613,  47000, "PPLA2", "DK", "H"),
+    ])
+    found = gz.nearest_seat(56.038, 12.650, 40000, 10.0, "DK")
+
+    assert found.name == "Helsingør"
+    assert found.cc == "DK"
+
+
+def test_nearest_seat_returns_nothing_when_the_radius_is_zero():
+    gz = _gazetteer([("Town", 55.0, 10.0, 60000, "PPLA2", "DK", "R")])
+    assert gz.nearest_seat(55.0, 10.0, 50000, 0.0) is None
+
+
+def test_a_chord_converts_back_to_the_distance_it_came_from():
+    """nearest_seat searches the ECEF tree, whose metric is the chord."""
+    for km in (0.5, 8.0, 120.0):
+        assert _great_circle_km(_chord_km(km)) == pytest.approx(km, rel=1e-9)
+
+
+# ── Municipalities ─────────────────────────────────────────────────────────
+
+# (name, lat, lon, population, feature_code, cc, admin1, admin2, admin3, admin4)
+KIEL_MUNI = ("DE", "10", "00", "01002", "01002000")
+KIEL = ("Kiel", 54.3233, 10.1394, 252668, "PPLA", *KIEL_MUNI)
+HOLTENAU = ("Holtenau", 54.3730, 10.1400, 0, "PPLX", *KIEL_MUNI)
+KNOOP = ("Knoop", 54.3830, 10.1130, 0, "PPL",
+         "DE", "10", "00", "01058", "01058005")
+HOLTENAU_QUAY = (54.3730, 10.1400)
+
+
+def test_a_municipality_is_resolved_through_a_dropped_district():
+    """
+    Kiel-Holtenau. The nearest place that survives filtering is Knoop, which is
+    in a different Kreis; only the unpopulated district "Holtenau" carries the
+    code that says the harbour is in Kiel. So the municipality index must be
+    built before the districts are dropped — and prepare_gazetteer.py must
+    write them to the file in the first place.
+    """
+    gz = _gazetteer([KIEL, HOLTENAU, KNOOP])
+    kiel = gz.nearest_seat(54.3659, 10.1418, 50000, 8.0, "DE")
+
+    assert kiel.name == "Kiel"
+    assert gz.shares_municipality(54.3659, 10.1418, kiel) is True
+    # …and Holtenau itself is not selectable as a city.
+    assert gz.nearest(54.3659, 10.1418).name != "Holtenau"
+
+
+def test_a_nearby_city_in_another_municipality_is_rejected():
+    """
+    Hellerup is 4.6 km from Copenhagen but in Gentofte kommune, so a harbour
+    there is not Copenhagen's. Distance alone cannot see that.
+    """
+    gz = _gazetteer([
+        ("Hellerup",   55.7300, 12.5800,       0, "PPL",  "DK", "17", "157"),
+        ("Copenhagen", 55.6761, 12.5683, 1153615, "PPLC", "DK", "17", "101"),
+    ])
+    city = gz.nearest_seat(55.7300, 12.5800, 50000, 8.0, "DK")
+
+    assert city.name == "Copenhagen"
+    assert gz.shares_municipality(55.7300, 12.5800, city) is False
+
+
+def test_a_gazetteer_without_division_codes_does_not_veto():
+    """
+    An older prepared file, or the bundled cities1000 fallback. The guard has
+    to stand down rather than reject everything.
+    """
+    gz = _gazetteer([
+        ("Hamlet", 55.7300, 12.5800,       0, "PPL",  "DK", "17"),
+        ("City",   55.6761, 12.5683, 1153615, "PPLC", "DK", "17"),
+    ])
+    assert gz.has_municipalities is False
+    assert gz.shares_municipality(55.73, 12.58, gz.nearest(55.6761, 12.5683)) is True
+
+
+def test_the_finest_available_division_is_the_municipality():
+    """
+    Germany fills admin4, Denmark stops at admin2. Comparing whatever is
+    finest keeps both usable without special-casing a country.
+    """
+    gz = _gazetteer([KIEL, HOLTENAU])
+    kiel = gz.nearest_seat(*HOLTENAU_QUAY, 50000, 8.0, "DE")
+
+    assert gz.has_municipalities is True
+    assert gz.shares_municipality(*HOLTENAU_QUAY, kiel) is True
