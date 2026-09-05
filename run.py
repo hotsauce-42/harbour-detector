@@ -33,8 +33,9 @@ def cmd_phase1(args, cfg: dict) -> None:
         config.raw_glob = args.raw_glob
 
     s3_cfg = build_s3_config(cfg.get("s3", {}))
-    app_name = cfg.get("spark", {}).get("app_name", "harbour-detector")
-    spark  = create_spark_session(s3_cfg, app_name=app_name)
+    spark_cfg = cfg.get("spark", {})
+    app_name = spark_cfg.get("app_name", "harbour-detector")
+    spark  = create_spark_session(s3_cfg, app_name=app_name, spark_cfg=spark_cfg)
     try:
         out = run_phase1(config, spark)
     finally:

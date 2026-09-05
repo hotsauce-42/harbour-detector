@@ -123,6 +123,120 @@ def spark_stops(spark, tmp_path_factory):
     return pd.read_parquet(out)
 
 
+# ---------------------------------------------------------------------------
+# phase1.use_type5_data — running Phase 1 without the type-5 flood
+# ---------------------------------------------------------------------------
+
+# The tug wins on count; the fishing code is there so a wrong tie-break or a
+# "first value" shortcut would pick something else.
+TUG, FISHING = 52, 30
+
+
+def _build_type5_fixture(tmp_path: Path) -> Phase1Config:
+    """Fixture data that actually carries type-5 rows, unlike _build_fixture."""
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+
+    rows = _make_position_rows(123456789, start_hour=0, n_messages=24,
+                               sog=0.1, nav_status=5, lat=53.54, lon=9.97)
+    for row in rows:
+        row["destination"] = None
+        row["ship_type"] = None
+
+    # Static reports for the same vessel, spread over the stop so they land
+    # inside draught_lookup_hours either side of it.
+    for i, ship_type in enumerate([TUG, TUG, TUG, FISHING]):
+        rows.append({
+            "mmsi": 123456789,
+            "timestamp": _ts(0) + timedelta(minutes=i * 30),
+            "lat": 53.54, "lon": 9.97, "sog": 0.0, "nav_status": 5,
+            "msg_type": 5, "draught": 4.5 + i,
+            "destination": "DEHAM", "ship_type": ship_type,
+        })
+
+    _write_parquet(rows, raw_dir / "2024-01-01_00.parquet")
+    return Phase1Config(
+        raw_glob=str(raw_dir / "*.parquet"),
+        interim_dir=str(tmp_path / "interim"),
+        sog_threshold_knots=0.5,
+        min_stop_duration_minutes=30.0,
+        min_messages_per_stop=3,
+        positional_variance_max_meters=300.0,
+        max_gap_minutes=15.0,
+        moored_nav_statuses=[1, 5],
+    )
+
+
+def _run_with_type5(spark, tmp_path_factory, *, enabled: bool) -> pd.DataFrame:
+    from pipeline.extract_stops_spark import run_phase1
+
+    tmp_path = tmp_path_factory.mktemp(f"phase1_t5_{enabled}")
+    config = _build_type5_fixture(tmp_path)
+    config.use_type5_data = enabled
+    return pd.read_parquet(run_phase1(config, spark))
+
+
+@pytest.fixture(scope="session")
+def stops_with_type5(spark, tmp_path_factory):
+    return _run_with_type5(spark, tmp_path_factory, enabled=True)
+
+
+@pytest.fixture(scope="session")
+def stops_without_type5(spark, tmp_path_factory):
+    return _run_with_type5(spark, tmp_path_factory, enabled=False)
+
+
+def test_type5_is_on_by_default():
+    """Production must keep the full behaviour without being told to."""
+    assert Phase1Config(raw_glob="", interim_dir="").use_type5_data is True
+    assert Phase1Config.from_yaml({}).use_type5_data is True
+    assert Phase1Config.from_yaml(
+        {"phase1": {"use_type5_data": False}}
+    ).use_type5_data is False
+
+
+def test_stops_are_found_either_way(stops_with_type5, stops_without_type5):
+    """Skipping type-5 must not change which stops exist — only their extras."""
+    assert len(stops_with_type5) == 1
+    assert (sorted(stops_without_type5["mmsi"])
+            == sorted(stops_with_type5["mmsi"]))
+    assert (stops_without_type5.iloc[0]["duration_minutes"]
+            == stops_with_type5.iloc[0]["duration_minutes"])
+
+
+def test_ship_type_survives_without_type5(stops_with_type5, stops_without_type5):
+    """
+    The reason this option exists rather than dropping type-5 outright:
+    ship_type is the well-populated field, and the Spark-side per-MMSI
+    aggregate has to agree with the pandas mode it replaces.
+    """
+    assert stops_with_type5.iloc[0]["ship_type"] == TUG
+    assert stops_without_type5.iloc[0]["ship_type"] == TUG
+
+
+def test_draught_and_destination_are_the_price(stops_without_type5):
+    """These need a type-5 row near the stop in time, so they cannot survive."""
+    row = stops_without_type5.iloc[0]
+    for column in ("draught_arrival", "draught_departure", "draught_delta"):
+        assert pd.isna(row[column]), column
+    assert not isinstance(row["destination_raw"], str)
+    assert not isinstance(row["destination_locode"], str)
+
+
+def test_draught_and_destination_are_present_with_type5(stops_with_type5):
+    """…and the default path still fills them, which is what production runs."""
+    row = stops_with_type5.iloc[0]
+    assert row["destination_locode"] == "DEHAM"
+    assert not pd.isna(row["draught_arrival"])
+
+
+def test_the_written_schema_is_identical_either_way(
+    stops_with_type5, stops_without_type5,
+):
+    """Phases 2-5 read this file; the rejoin must not reorder or drop columns."""
+    assert list(stops_without_type5.columns) == list(stops_with_type5.columns)
+
+
 def test_moored_vessel_produces_stop(spark_stops):
     vessel_a = spark_stops[spark_stops["mmsi"] == 123456789]
     assert len(vessel_a) == 1

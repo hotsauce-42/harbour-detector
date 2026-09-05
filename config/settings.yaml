@@ -37,6 +37,17 @@ phase1:
   # Draught join: how far before/after a stop to look for type 5 messages
   draught_lookup_hours: 6
 
+  # Type-5 messages carry draught, destination and ship_type. In a file from
+  # scripts/convert_aisdk_csv.py they are ~99% of the rows (the DMA export puts
+  # voyage data on nearly every record), so they dominate Phase 1's shuffle —
+  # 43M of 63M rows on a one-day Danish extract, holding only ~12k distinct
+  # values. Switching this off leaves draught and destination empty but keeps
+  # ship_type, which is rebuilt from a cheap per-MMSI aggregate that never
+  # leaves the JVM. Meant for running Phase 1 on a workstation:
+  #   PHASE1__USE_TYPE5_DATA=false python run.py phase1
+  # Leave it true in production.
+  use_type5_data: true
+
 phase2:
   h3_resolution: 11
   # Per-cell noise floor only (res-11 cells are ~50 m across — single berths
@@ -59,6 +70,22 @@ phase3:
   # Legacy fallback (used only when connectivity_resolution is null): how many
   # H3 rings to look outward when connecting hot cells.
   cluster_ring_size: 3
+  # Connectivity above is decided on res-9 parents, so two cells hundreds of
+  # metres apart join one cluster whenever their parents touch. That admits the
+  # odd speck out in the water — a stray anchoring, GPS scatter — which is then
+  # exported as its own polygon part. This second pass re-checks connectivity on
+  # the fine cells and drops what is left stranded.
+  prune_detached_cells: true
+  # How far a cell may be from the rest and still count as attached. At res 11
+  # (~50 m across) two rings is ~105 m.
+  detached_ring_size: 2
+  # A stranded group is only dropped when it is both small AND quiet. Either
+  # test alone is wrong: harbours really do have detached berths — most are
+  # fragmented at single-ring adjacency, and a detached group can hold half the
+  # traffic — so size alone would delete a third of all cells, while traffic
+  # share alone would swallow whole outlying terminals.
+  max_detached_cells: 2
+  max_detached_event_share: 0.05
 
 phase4:
   # Nearest-place lookup. Empty = the cities1000 dataset bundled with
@@ -105,8 +132,19 @@ phase5:
 
 spark:
   app_name: "harbour-detector"
-  # All other Spark/executor settings live in deploy/spark_job.yaml (sparkConf,
-  # driver/executor resources). Only app_name is needed here.
+  # Production Spark/executor settings live in deploy/spark_job.yaml (sparkConf,
+  # driver/executor resources). Everything below applies to **local mode only**
+  # and is skipped inside Kubernetes, where the Spark Operator supplies them.
+  #
+  # Spark's own defaults assume a cluster: one task thread per core — each with
+  # its own Python worker holding a pandas frame — against a 1 GB driver heap
+  # that in local mode is the entire JVM. That combination is what runs a
+  # laptop out of memory in Phase 1.
+  local_threads: 2                # task slots = concurrent Python workers
+  local_driver_memory: "3g"       # JVM heap; in local mode this is everything
+  local_shuffle_partitions: 64    # groupBy(mmsi) shuffle width (Spark default 200)
+  local_arrow_batch_size: 5000    # rows per Arrow batch into a Python worker
+  local_max_partition_bytes: "32m"  # read split size (Spark default 128m)
 
 s3:
   # Leave blank to use environment variables or IAM instance roles.

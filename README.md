@@ -99,6 +99,7 @@ Adjust these if your Parquet files use different column names.
 | `positional_variance_max_meters` | `300` | Discard stops where the vessel was still drifting |
 | `mmsi_min` / `mmsi_max` | `100000000` / `999999999` | Filter out invalid MMSI numbers |
 | `draught_lookup_hours` | `6` | Window around a stop to look for Type 5 voyage messages |
+| `use_type5_data` | `true` | Process Type 5 messages at all. Turn off to run Phase 1 on a workstation — see [Running Phase 1 on a laptop](#running-phase-1-on-a-laptop) |
 
 ### `phase2` — H3 aggregation
 
@@ -113,6 +114,20 @@ Adjust these if your Parquet files use different column names.
 |-----|---------|-------------|
 | `min_cells_per_harbour` | `1` | Minimum H3 cells for a connected component to be kept |
 | `cluster_ring_size` | `3` | H3 rings to search for neighbours. `1` = touching only; `3` bridges ~75 m gaps between hot cells, merging fragmented harbour complexes. Increase for large port areas with cold cells between berths. |
+| `prune_detached_cells` | `true` | Drop stray cells stranded off the harbour body — see [Detached cells](#detached-cells) |
+| `detached_ring_size` | `2` | How far a cell may be from the rest and still count as attached. At res 11 (~50 m cells) two rings is ~105 m |
+| `max_detached_cells` | `2` | A stranded group larger than this is a real berth, and is kept |
+| `max_detached_event_share` | `0.05` | …and so is one carrying at least this share of the harbour's events |
+
+#### Detached cells
+
+Clusters are connected through res-9 **parent** cells, so two res-11 cells hundreds of metres apart join the same harbour whenever their parents happen to touch. That admits the occasional speck out in the water — a single anchoring, GPS scatter — which is then exported as its own polygon part. Tunø By carried two, 205 m and 369 m out, 2 AIS events each against the harbour's 107.
+
+Phase 3 therefore re-checks connectivity on the fine cells and drops what is left stranded — but only when the group is **both** small and quiet. Either test alone is wrong: harbours really do have detached berths (most are fragmented at single-ring adjacency, and a detached group can hold half the traffic), so a size test alone would delete a third of every cell in the output, while a traffic test alone would swallow whole outlying terminals.
+
+On a 331-harbour Danish run this removes 45 of 2 413 cells across 29 harbours, the largest single loss being 15 events, and moves exactly one harbour's centroid into a different res-8 cell. Set `prune_detached_cells: false` for the old behaviour.
+
+> Pruning shrinks `h3_cells` and shifts the event-weighted centroid, and `harbour_id` is `{country_iso2}-{uuid5(centroid_h3_r8)[:8]}` — so a harbour whose centroid crosses a res-8 boundary is re-issued an ID unless Phase 5 matches it against `existing_db_path`.
 
 ### `phase4` — Enrichment
 
@@ -177,8 +192,41 @@ Phase 5 also reads `phase4.outline_fill_holes`, so merging a drawn outline treat
 | Key | Default | Description |
 |-----|---------|-------------|
 | `app_name` | `"harbour-detector"` | Spark application name shown in the Spark UI |
+| `local_threads` | `2` | Local-mode task slots. Each is a Python worker holding its own pandas frame, so Spark's `local[*]` means one per core |
+| `local_driver_memory` | `"3g"` | Local-mode JVM heap. In local mode the driver *is* the executor, and Spark's default is 1 GB |
+| `local_shuffle_partitions` | `64` | Width of the `groupBy(mmsi)` shuffle (Spark's default, 200, is sized for a cluster) |
+| `local_arrow_batch_size` | `5000` | Rows per Arrow batch handed to a Python worker |
+| `local_max_partition_bytes` | `"32m"` | Parquet read split size (Spark default `128m`) |
 
-All other Spark settings (executor count, memory, cores) live in `deploy/spark_job.yaml` under `sparkConf` / `driver` / `executor`.
+Every `local_*` key applies **only outside Kubernetes**. In a cluster the Spark Operator supplies these, and the settings that matter there (executor count, memory, cores) live in `deploy/spark_job.yaml` under `sparkConf` / `driver` / `executor`.
+
+### Running Phase 1 on a laptop
+
+Phase 1 is the only phase that needs Spark, and the only one sized for a server. On a one-day Danish extract (288 files, 659 MB, 43.9 M rows) it unions **19.4 M positional candidates with 43.3 M Type 5 rows** and shuffles all 62.7 M through `groupBy(mmsi).applyInPandas`.
+
+That Type 5 volume is an artefact of the source format, not of AIS: `scripts/convert_aisdk_csv.py` marks any row carrying voyage data as `msg_type = 5`, and the DMA export puts voyage data on nearly every record — 98.6% of the file. Those 43.3 M rows contain just **12,534 distinct** `(mmsi, draught, destination, ship_type)` combinations.
+
+So for local runs, switch the Type 5 leg off:
+
+```bash
+echo "PHASE1__USE_TYPE5_DATA=false" >> .env     # or set it per-run
+python run.py phase1
+```
+
+Production keeps `use_type5_data: true` in `config/settings.yaml` and is unaffected — the env override is what changes it here, so no image or config change ships.
+
+What you give up, and what you keep:
+
+| | with Type 5 | without |
+|---|---|---|
+| rows through the shuffle | 62.7 M | **19.4 M** |
+| `draught_arrival` / `_departure` / `_delta` | filled | empty |
+| `destination_raw` / `destination_locode` | filled | empty |
+| `ship_type` → `n_cargo`…`n_tug_pilot` | filled | **still filled** |
+
+`ship_type` survives because it is a vessel attribute rather than a per-message one, so it is recomputed by `_ship_type_by_mmsi` — a per-MMSI aggregate that never leaves the JVM. Draught and destination cannot survive: `_join_type5_data` needs a Type 5 record within `draught_lookup_hours` of each individual stop.
+
+On the reference dataset, draught is nearly absent anyway (34 of 2,678 cells; 10 of 331 harbours), while the vessel-type breakdown covers 2,253 of 2,678 cells — which is why the split falls where it does.
 
 ### `s3` — S3 / MinIO storage
 

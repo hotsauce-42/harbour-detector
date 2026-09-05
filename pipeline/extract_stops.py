@@ -72,6 +72,12 @@ class Phase1Config:
     mmsi_min: int = 100_000_000
     mmsi_max: int = 999_999_999
     draught_lookup_hours: int = 6
+    # Type-5 rows carry draught, destination and ship_type — and in a
+    # DMA-converted file they are ~99% of the input, so they dominate Phase 1's
+    # shuffle. Turning them off trades draught and destination for a run that
+    # fits on a laptop; ship_type is preserved by other means (see
+    # extract_stops_spark._ship_type_by_mmsi). Leave on in production.
+    use_type5_data: bool = True
 
     @classmethod
     def from_yaml(cls, cfg: dict) -> "Phase1Config":
@@ -103,6 +109,7 @@ class Phase1Config:
             mmsi_min=p1.get("mmsi_min", 100_000_000),
             mmsi_max=p1.get("mmsi_max", 999_999_999),
             draught_lookup_hours=p1.get("draught_lookup_hours", 6),
+            use_type5_data=p1.get("use_type5_data", True),
         )
 
 

@@ -13,10 +13,13 @@ from pipeline.cluster_formation import (
     _cluster_stats,
     _connected_components,
     _filter_clusters,
+    _load_cell_mmsi_map,
     _parent_components,
+    _prune_detached_cells,
     run_phase3,
 )
 from pipeline.h3_aggregation import H3_COUNTS_SCHEMA
+from utils.geo import haversine_meters
 
 RES = 11
 # A cell in Hamburg harbour
@@ -29,12 +32,19 @@ def _neighbours(cell: str, n: int = 1) -> list[str]:
 
 
 def _make_counts(cells: list[str], n_unique_mmsi: int = 10,
-                 n_events: int = 20) -> pd.DataFrame:
+                 n_events: int | dict[str, int] = 20) -> pd.DataFrame:
+    """
+    A minimal h3_counts frame. `n_events` may be a per-cell mapping, which is
+    what the pruning tests need — an outlier is defined by carrying less
+    traffic than the body, so a single constant cannot express one.
+    """
     latlons = [h3.cell_to_latlng(c) for c in cells]
+    events = (n_events if isinstance(n_events, dict)
+              else dict.fromkeys(cells, n_events))
     return pd.DataFrame({
         "h3_cell":                cells,
         "n_unique_mmsi":          [n_unique_mmsi] * len(cells),
-        "n_events":               [n_events]      * len(cells),
+        "n_events":               [events[c] for c in cells],
         "total_duration_minutes": [120.0]         * len(cells),
         "mean_duration_minutes":  [60.0]          * len(cells),
         "cell_lat":               [ll[0] for ll in latlons],
@@ -113,6 +123,131 @@ def test_parent_components_rejects_finer_resolution():
     with pytest.raises(ValueError):
         _parent_components({cell}, connectivity_res=RES)
 
+
+def test_an_empty_stops_directory_falls_back_instead_of_raising(tmp_path):
+    """
+    Spark writes stops.parquet as a directory, so it can exist and hold no part
+    files — an interrupted or cleaned-up Phase 1. pyarrow cannot infer a schema
+    from that and raises on the column selection; Phase 3 must degrade to
+    approximate vessel counts exactly as it does for a missing file.
+    """
+    (tmp_path / "stops.parquet").mkdir()
+    config = Phase3Config(interim_dir=str(tmp_path))
+
+    assert _load_cell_mmsi_map(config, {SEED_CELL}) is None
+
+
+# ---------------------------------------------------------------------------
+# Pruning detached outlier cells
+# ---------------------------------------------------------------------------
+
+# Far enough that no ring size in play reaches it, but still inside the same
+# res-9 parent neighbourhood — which is exactly how these cells get in.
+STRAY_CELL = h3.latlng_to_cell(53.5432, 9.9724, RES)
+
+
+def _prune_config(**kwargs) -> Phase3Config:
+    return Phase3Config(interim_dir="", **kwargs)
+
+
+def _body(n: int = 6) -> list[str]:
+    """A contiguous blob: the seed cell plus its first ring."""
+    return [SEED_CELL, *_neighbours(SEED_CELL)[:n - 1]]
+
+
+def test_a_contiguous_cluster_is_returned_untouched():
+    cells = _body()
+    counts = _make_counts(cells)
+    assert _prune_detached_cells([cells], counts, _prune_config()) == [cells]
+
+
+def test_a_lone_quiet_cell_off_the_body_is_dropped():
+    """
+    Tunø By (DK-f1661c3f): two single cells 205 m and 369 m out, 2 events each
+    against the harbour's 107, exported as two extra polygon parts.
+    """
+    cells = [*_body(), STRAY_CELL]
+    counts = _make_counts(cells, n_events={**dict.fromkeys(_body(), 20),
+                                           STRAY_CELL: 2})
+    kept = _prune_detached_cells([cells], counts, _prune_config())
+
+    assert STRAY_CELL not in kept[0]
+    assert sorted(kept[0]) == sorted(_body())
+
+
+def test_a_busy_detached_berth_is_kept():
+    """The traffic guard. A second terminal is not an artifact."""
+    cells = [*_body(), STRAY_CELL]
+    counts = _make_counts(cells, n_events={**dict.fromkeys(_body(), 10),
+                                           STRAY_CELL: 30})
+    kept = _prune_detached_cells([cells], counts, _prune_config())
+
+    assert STRAY_CELL in kept[0]
+
+
+def test_a_large_detached_group_is_kept_however_quiet():
+    """
+    The size guard. Cells clustered together out there are a place, not
+    scatter — even carrying 1% of the traffic.
+    """
+    outlier = [STRAY_CELL, *_neighbours(STRAY_CELL)[:4]]
+    cells = [*_body(), *outlier]
+    counts = _make_counts(cells, n_events={**dict.fromkeys(_body(), 100),
+                                           **dict.fromkeys(outlier, 1)})
+    kept = _prune_detached_cells([cells], counts, _prune_config())
+
+    assert sorted(kept[0]) == sorted(cells)
+
+
+def test_the_body_is_the_busiest_group_not_the_biggest():
+    """
+    A single berth taking all the traffic keeps its cluster; the sprawl of
+    quiet cells around it is what goes.
+    """
+    quiet = [STRAY_CELL, *_neighbours(STRAY_CELL)[:1]]
+    cells = [SEED_CELL, *quiet]
+    counts = _make_counts(cells, n_events={SEED_CELL: 500,
+                                           **dict.fromkeys(quiet, 1)})
+    kept = _prune_detached_cells([cells], counts, _prune_config())
+
+    assert kept == [[SEED_CELL]]
+
+
+def test_pruning_can_be_switched_off():
+    cells = [*_body(), STRAY_CELL]
+    counts = _make_counts(cells, n_events={**dict.fromkeys(_body(), 20),
+                                           STRAY_CELL: 1})
+    kept = _prune_detached_cells(
+        [cells], counts, _prune_config(prune_detached_cells=False)
+    )
+    assert kept == [cells]
+
+
+def test_pruning_pulls_the_centroid_back_onto_the_body():
+    """
+    What the prune is ultimately for. The stray cell drags the event-weighted
+    centroid out towards itself, and the centroid is what `centroid_h3_r8` —
+    and so the harbour id — is derived from.
+    """
+    cells = [*_body(), STRAY_CELL]
+    counts = _make_counts(cells, n_events={**dict.fromkeys(_body(), 20),
+                                           STRAY_CELL: 2})
+    stray_lat, stray_lon = h3.cell_to_latlng(STRAY_CELL)
+
+    def distance_to_stray(row):
+        return haversine_meters(row["centroid_lat"], row["centroid_lon"],
+                                stray_lat, stray_lon)
+
+    before = _cluster_stats([cells], counts)[0]
+    after = _cluster_stats(
+        _prune_detached_cells([cells], counts, _prune_config()), counts
+    )[0]
+
+    assert distance_to_stray(after) > distance_to_stray(before)
+    assert after["n_cells"] == len(_body())
+
+
+# ---------------------------------------------------------------------------
 
 def test_cluster_stats_centroid_weighted():
     cell_a = SEED_CELL

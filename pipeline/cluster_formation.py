@@ -73,6 +73,10 @@ class Phase3Config:
     min_unique_mmsi_per_cluster: int = 5  # distinct vessels required per cluster
     connectivity_resolution: Optional[int] = 9  # parent res; None → legacy rings
     cluster_ring_size: int = 3            # legacy ring search radius (see above)
+    prune_detached_cells: bool = True     # drop stray specks off the harbour body
+    detached_ring_size: int = 2           # rings that still count as "attached"
+    max_detached_cells: int = 2           # a bigger detached group is a real berth
+    max_detached_event_share: float = 0.05  # …and so is a busier one
     s3_cfg: dict = field(default_factory=dict)
 
     @classmethod
@@ -87,6 +91,10 @@ class Phase3Config:
             min_unique_mmsi_per_cluster=p3.get("min_unique_mmsi_per_cluster", 5),
             connectivity_resolution=p3.get("connectivity_resolution", 9),
             cluster_ring_size=p3.get("cluster_ring_size", 3),
+            prune_detached_cells=p3.get("prune_detached_cells", True),
+            detached_ring_size=p3.get("detached_ring_size", 2),
+            max_detached_cells=p3.get("max_detached_cells", 2),
+            max_detached_event_share=p3.get("max_detached_event_share", 0.05),
             s3_cfg=build_s3_config(cfg.get("s3", {})),
         )
 
@@ -175,7 +183,89 @@ def _parent_components(hot_cells: set[str], connectivity_res: int) -> list[list[
 
 
 # ---------------------------------------------------------------------------
-# Step 3: exact per-cluster vessel counts from stops
+# Step 3: prune detached outlier cells
+# ---------------------------------------------------------------------------
+
+def _prune_detached_cells(
+    components: list[list[str]],
+    cell_df: pd.DataFrame,
+    config: Phase3Config,
+) -> list[list[str]]:
+    """
+    Drop stray cells that sit off the harbour body.
+
+    Clusters are formed on res-9 *parent* cells, so two res-11 cells hundreds of
+    metres apart join the same cluster whenever their parents happen to touch —
+    and nothing afterwards reconsiders it. The result is a lone cell out in the
+    water, exported as its own polygon part. Tunø By (DK-f1661c3f) carried two,
+    205 m and 369 m out, 2 AIS events each of the harbour's 107.
+
+    So connectivity is checked a second time on the fine cells, and a group that
+    does not reach the main body within `detached_ring_size` rings is dropped —
+    but only if it is both small and quiet. Either test alone is wrong: real
+    harbours legitimately have detached berths (233 of 331 harbours are
+    fragmented at single-ring adjacency, and a detached group can hold half the
+    traffic), so size alone would eat a third of every cell in the output, and
+    traffic share alone would eat whole outlying terminals.
+
+    Whatever survives is what `_cluster_stats` then measures — counts, the
+    event-weighted centroid, `centroid_h3_r8` and the bbox all come out of these
+    lists — and `_filter_clusters` re-applies the cluster minimums afterwards,
+    so a cluster pruned below them is still dropped.
+    """
+    if not config.prune_detached_cells:
+        return components
+
+    events = cell_df.set_index("h3_cell")["n_events"].to_dict()
+    pruned: list[list[str]] = []
+    dropped_cells = 0
+    touched = 0
+
+    for cells in components:
+        groups = _connected_components(
+            _build_adjacency(set(cells), config.detached_ring_size)
+        )
+        if len(groups) == 1:
+            pruned.append(cells)
+            continue
+
+        def group_events(group: list[str]) -> int:
+            return sum(int(events.get(cell, 0)) for cell in group)
+
+        # Most traffic wins, then most cells; the cell id only breaks a full tie,
+        # so the choice does not depend on dict ordering.
+        groups.sort(key=lambda g: (-group_events(g), -len(g), sorted(g)[0]))
+        total = sum(group_events(g) for g in groups) or 1
+
+        keep = list(groups[0])
+        lost = 0
+        for group in groups[1:]:
+            detached = (
+                len(group) <= config.max_detached_cells
+                and group_events(group) / total < config.max_detached_event_share
+            )
+            if detached:
+                lost += len(group)
+            else:
+                keep.extend(group)
+
+        if lost:
+            touched += 1
+            dropped_cells += lost
+        pruned.append(keep)
+
+    if dropped_cells:
+        logger.info(
+            "  pruned %d detached cell(s) from %d cluster(s) "
+            "(<=%d cells and <%.0f%% of events, beyond %d rings)",
+            dropped_cells, touched, config.max_detached_cells,
+            config.max_detached_event_share * 100, config.detached_ring_size,
+        )
+    return pruned
+
+
+# ---------------------------------------------------------------------------
+# Step 4: exact per-cluster vessel counts from stops
 # ---------------------------------------------------------------------------
 
 def _load_cell_mmsi_map(
@@ -185,7 +275,13 @@ def _load_cell_mmsi_map(
     Re-join stops.parquet to the hot cells: returns h3_cell → set of MMSIs,
     so cluster-level unique-vessel counts are exact (a vessel spanning several
     cells of one cluster counts once). Returns None when stops.parquet is
-    missing, in which case the caller falls back to approximate counts.
+    missing or unreadable, in which case the caller falls back to approximate
+    counts.
+
+    Spark writes stops.parquet as a *directory*, so it can exist and still hold
+    no part files — after a cleaned-up or interrupted Phase 1. pyarrow cannot
+    infer a schema from that and raises on the column selection, which is the
+    same situation as the file being absent and is handled the same way.
     """
     stops_path = path_join(config.interim_dir, "stops.parquet")
     if is_s3_path(config.interim_dir):
@@ -200,13 +296,20 @@ def _load_cell_mmsi_map(
         )
         return None
 
-    if is_s3_path(config.interim_dir):
-        stops = pd.read_parquet(
-            stops_path, columns=["mmsi", "lat", "lon"],
-            storage_options=get_s3_storage_options(config.s3_cfg),
+    try:
+        if is_s3_path(config.interim_dir):
+            stops = pd.read_parquet(
+                stops_path, columns=["mmsi", "lat", "lon"],
+                storage_options=get_s3_storage_options(config.s3_cfg),
+            )
+        else:
+            stops = pd.read_parquet(stops_path, columns=["mmsi", "lat", "lon"])
+    except Exception as exc:
+        logger.warning(
+            "Could not read %s (%s) — cluster vessel counts will be "
+            "approximate (sum of per-cell uniques)", stops_path, exc,
         )
-    else:
-        stops = pd.read_parquet(stops_path, columns=["mmsi", "lat", "lon"])
+        return None
 
     resolution = h3.get_resolution(next(iter(hot_cells)))
     stops["h3_cell"] = [
@@ -220,7 +323,7 @@ def _load_cell_mmsi_map(
 
 
 # ---------------------------------------------------------------------------
-# Step 4: compute per-cluster statistics
+# Step 5: compute per-cluster statistics
 # ---------------------------------------------------------------------------
 
 def _cluster_stats(
@@ -272,7 +375,7 @@ def _cluster_stats(
 
 
 # ---------------------------------------------------------------------------
-# Step 4: filter noise
+# Step 6: filter noise
 # ---------------------------------------------------------------------------
 
 def _filter_clusters(df: pd.DataFrame, config: Phase3Config) -> pd.DataFrame:
@@ -293,7 +396,7 @@ def _filter_clusters(df: pd.DataFrame, config: Phase3Config) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# Step 5: write output
+# Step 7: write output
 # ---------------------------------------------------------------------------
 
 def _write_clusters(df: pd.DataFrame, config: Phase3Config) -> str:
@@ -365,6 +468,8 @@ def run_phase3(config: Phase3Config) -> str:
         graph = _build_adjacency(hot_cells, config.cluster_ring_size)
         components = _connected_components(graph)
     logger.info("  found %d raw components", len(components))
+
+    components = _prune_detached_cells(components, cell_df, config)
 
     logger.info("Joining stops for exact vessel counts …")
     cell_mmsi = _load_cell_mmsi_map(config, hot_cells)

@@ -11,7 +11,7 @@ _join_type5_data) is imported unchanged from extract_stops.py.
 import logging
 
 import pandas as pd
-from pyspark.sql import SparkSession
+from pyspark.sql import SparkSession, Window
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
     DoubleType,
@@ -106,6 +106,38 @@ def _make_vessel_processor(config: Phase1Config):
     return process_vessel
 
 
+def _ship_type_by_mmsi(type5):
+    """
+    Most frequent positive ship_type per MMSI, computed in the JVM.
+
+    `_join_type5_data` derives the same value — "mode of ship_type across ALL
+    type-5 for this MMSI" — but only after every type-5 row has been shuffled
+    into a Python worker. Ship type is a vessel attribute, not a per-message
+    one, so when `use_type5_data` is off this aggregate reconstructs it from
+    ~11k rows of output instead, and the 43M input rows never leave Spark.
+
+    The `asc(ship_type)` tie-break matches pandas `.mode().iloc[0]`, which
+    returns the smallest value when counts tie, so both paths agree.
+    """
+    counts = (
+        type5
+        .filter(F.col("ship_type") > 0)
+        .groupBy("mmsi", "ship_type")
+        .agg(F.count("*").alias("_n"))
+    )
+    ranked = counts.withColumn(
+        "_rank",
+        F.row_number().over(
+            Window.partitionBy("mmsi").orderBy(F.desc("_n"), F.asc("ship_type"))
+        ),
+    )
+    return (
+        ranked
+        .filter(F.col("_rank") == 1)
+        .select("mmsi", F.col("ship_type").cast(ShortType()).alias("ship_type"))
+    )
+
+
 def _to_s3a(path: str) -> str:
     """Rewrite s3:// URIs to s3a:// for Spark's Hadoop S3A connector."""
     return "s3a://" + path[5:] if path.startswith("s3://") else path
@@ -187,12 +219,32 @@ def run_phase1(config: Phase1Config, spark: SparkSession) -> str:
     )
 
     # ── Union → per-MMSI pandas UDF ──────────────────────────────────────────
-    combined = candidates.unionByName(type5, allowMissingColumns=True)
+    # With type-5 in, the UDF sees both row kinds and _join_type5_data fills
+    # draught, destination and ship_type. With it out, only the positional rows
+    # are shuffled — on a DMA-converted file that is a third of the volume —
+    # and _join_type5_data nulls those columns for an empty t5 frame.
+    if c.use_type5_data:
+        combined = candidates.unionByName(type5, allowMissingColumns=True)
+    else:
+        logger.info(
+            "phase1.use_type5_data is off: skipping draught/destination, "
+            "recovering ship_type from a per-MMSI aggregate"
+        )
+        combined = candidates
 
     process_vessel = _make_vessel_processor(config)
     stops_df = combined.groupBy("mmsi").applyInPandas(
         process_vessel, schema=SPARK_STOP_SCHEMA
     )
+
+    if not c.use_type5_data:
+        # ship_type came back all-null; put it back from the cheap aggregate.
+        # Reselect _OUTPUT_COLS so the written schema is unchanged either way.
+        stops_df = (
+            stops_df.drop("ship_type")
+            .join(F.broadcast(_ship_type_by_mmsi(type5)), on="mmsi", how="left")
+            .select(*_OUTPUT_COLS)
+        )
 
     # ── Write ────────────────────────────────────────────────────────────────
     out_path  = path_join(config.interim_dir, "stops.parquet")
