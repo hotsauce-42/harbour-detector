@@ -292,8 +292,7 @@ def test_a_configured_gazetteer_names_a_harbour_after_its_village(tmp_path):
     assert result.iloc[0]["nearest_city"] == "Vejrø"
     assert result.iloc[0]["nearest_city_dist_km"] < 2
     assert result.iloc[0]["admin1"] == "Zuid"
-    # The country still comes from reverse_geocoder — the harbour ID depends on
-    # it, so the gazetteer must not be able to move it.
+    # Country now comes from the gazetteer too; here both sources agree.
     assert result.iloc[0]["country_iso2"] == "NL"
 
 
@@ -344,3 +343,83 @@ def test_a_missing_gazetteer_still_produces_a_city(tmp_path):
 
     assert result.iloc[0]["nearest_city"] != ""
     assert result.iloc[0]["country_iso2"] == "DE"
+
+
+# ---------------------------------------------------------------------------
+# Country — taken from the gazetteer, with reverse_geocoder as the fallback
+# ---------------------------------------------------------------------------
+
+# A real harbour in the Koster archipelago, Sweden. reverse_geocoder puts it in
+# Norway: its k-d tree minimises Euclidean distance over raw degrees, and at
+# 58.9°N a degree of longitude is 0.52× a degree of latitude, so it reaches
+# 14.8 km across the Skagerrak to Skjærhalden instead of 1.0 km to Nord-Koster.
+KOSTER_LAT, KOSTER_LON = 58.89282, 11.01081
+
+
+def test_the_gazetteer_overrules_reverse_geocoder_on_country(tmp_path):
+    """The one harbour of 328 this was measured to fix."""
+    path = tmp_path / "places.parquet"
+    _write_gazetteer(path, [
+        ("Nord-Koster", 58.9020, 11.0060, 0, "PPL", "SE", "Västra Götaland"),
+    ])
+    df = _make_clusters_df([_cluster_row(0, KOSTER_LAT, KOSTER_LON)])
+
+    result = _add_geocoding(df, Phase4Config(interim_dir="",
+                                             gazetteer_path=str(path)))
+
+    assert result.iloc[0]["country_iso2"] == "SE"
+    assert result.iloc[0]["country_name"] == "Sweden"
+    assert result.iloc[0]["nearest_city"] == "Nord-Koster"
+
+
+def test_country_follows_the_nearest_place_not_the_floored_city(tmp_path):
+    """
+    The design decision, pinned. A population floor can select a town tens of
+    km away, and that town may be across a border while the village beside the
+    quay is not — so country is resolved at floor 0, independently of the city.
+    """
+    path = tmp_path / "places.parquet"
+    _write_gazetteer(path, [
+        ("Border Village", KOSTER_LAT + 0.009, KOSTER_LON,     0, "PPL", "SE", "V"),
+        ("Big City",       KOSTER_LAT + 0.27,  KOSTER_LON, 90000, "PPL", "NO", "O"),
+    ])
+    df = _make_clusters_df([_cluster_row(0, KOSTER_LAT, KOSTER_LON)])
+    df.loc[0, "n_cells"] = 200           # clears a tier, so the city wins on name …
+
+    result = _add_geocoding(df, Phase4Config(interim_dir="",
+                                             gazetteer_path=str(path)))
+
+    assert result.iloc[0]["nearest_city"] == "Big City"
+    # … while the country stays with the village next door.
+    assert result.iloc[0]["country_iso2"] == "SE"
+
+
+def test_country_falls_back_to_reverse_geocoder_when_nothing_is_near(tmp_path):
+    """
+    A gazetteer built for one region (prepare_gazetteer.py --countries …) must
+    not hand a harbour the country of a place on the far side of it.
+    """
+    path = tmp_path / "places.parquet"
+    _write_gazetteer(path, [
+        ("Far Away", HAMBURG_LAT + 0.5, HAMBURG_LON, 500, "PPL", "XX", "Nowhere"),
+    ])
+    df = _make_clusters_df([_cluster_row(0, HAMBURG_LAT, HAMBURG_LON)])
+
+    result = _add_geocoding(
+        df, Phase4Config(interim_dir="", gazetteer_path=str(path),
+                         max_city_dist_km=5.0),
+    )
+
+    assert result.iloc[0]["country_iso2"] == "DE"      # from reverse_geocoder
+    assert result.iloc[0]["country_name"] == "Germany"
+
+
+def test_a_missing_gazetteer_still_produces_a_country(tmp_path):
+    """The bundled cities1000 fallback carries cc, so country survives it."""
+    df = _make_clusters_df([_cluster_row(0, HAMBURG_LAT, HAMBURG_LON)])
+    result = _add_geocoding(
+        df, Phase4Config(interim_dir="",
+                         gazetteer_path=str(tmp_path / "absent.parquet")),
+    )
+    assert result.iloc[0]["country_iso2"] == "DE"
+    assert result.iloc[0]["country_name"] == "Germany"

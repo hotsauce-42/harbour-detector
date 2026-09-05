@@ -204,10 +204,11 @@ def _add_geocoding(clusters: pd.DataFrame, config: Phase4Config) -> pd.DataFrame
 
     coords = list(zip(clusters["centroid_lat"], clusters["centroid_lon"]))
 
-    # Country still comes from reverse_geocoder, deliberately: the harbour ID is
-    # '{country_iso2}-{hash}', so re-deriving the country from another source
-    # would re-ID every harbour and break Phase 5's match against the existing
-    # database. The city is not part of the ID and is free to improve.
+    # reverse_geocoder is now only the fallback for country and admin1. Its own
+    # answer is unreliable for the same reason it was replaced for the city: it
+    # minimises Euclidean distance over raw degrees, so at 58.9°N it reached
+    # across the Skagerrak and put a harbour in the Swedish Koster archipelago
+    # — 1.0 km from Nord-Koster — in Norway, from a town 14.8 km away.
     # mode=2 → quiet batch mode
     results = rg.search(coords, mode=2)
 
@@ -234,18 +235,30 @@ def _add_geocoding(clusters: pd.DataFrame, config: Phase4Config) -> pd.DataFrame
     admin1s = []
 
     n_floored = 0
+    n_rg_country = 0
     for (clat, clon), r, n_cells in zip(coords, results, clusters["n_cells"]):
-        iso2 = r.get("cc", "")
+        # Country comes from the *nearest* place, never the population-floored
+        # city below: a floor can select a town tens of km away, and that town
+        # may be across a border while the village next to the quay is not.
+        # The floor-0 tree is already built and cached by Gazetteer._tree_for,
+        # so this costs one more query on an existing index.
+        country_place = gazetteer.nearest(clat, clon, 0)
+        if (country_place is not None
+                and country_place.distance_km <= config.max_city_dist_km):
+            iso2 = country_place.cc
+        else:
+            iso2 = r.get("cc", "")
+            n_rg_country += 1
         country_iso2.append(iso2)
         country_names.append(_country_name(iso2))
 
         floor = population_floor(int(n_cells), tiers)
-        place = gazetteer.nearest(clat, clon, floor)
+        place = gazetteer.nearest(clat, clon, floor) if floor else country_place
         # A floor that only reaches something implausibly far away is worse
-        # than no floor: fall back to whatever is actually next to the harbour.
+        # than no floor: fall back to whatever is actually next to the harbour,
+        # which is the place the country was taken from.
         if place is None or place.distance_km > config.max_city_dist_km:
-            fallback = gazetteer.nearest(clat, clon, 0)
-            place = fallback if fallback is not None else place
+            place = country_place if country_place is not None else place
         elif floor > 0:
             n_floored += 1
 
@@ -266,11 +279,21 @@ def _add_geocoding(clusters: pd.DataFrame, config: Phase4Config) -> pd.DataFrame
         city_lats.append(place.lat)
         city_lons.append(place.lon)
         city_dists_km.append(place.distance_km)
+        # admin1 stays tied to the city, not to the place the country came
+        # from. The two can only differ when a population floor actually fires
+        # and reaches into another region — no harbour in this dataset gets
+        # near the first tier (largest is 47 cells, the tier starts at 100).
         admin1s.append(place.admin1 or r.get("admin1", ""))
 
     if n_floored:
         logger.info("  %d harbour(s) large enough to require a populated city",
                     n_floored)
+    if n_rg_country:
+        logger.warning(
+            "  %d harbour(s) had no gazetteer place within %.0f km — country "
+            "fell back to reverse_geocoder; check phase4.gazetteer_path covers "
+            "this region", n_rg_country, config.max_city_dist_km,
+        )
     far = sum(1 for d in city_dists_km if d > config.max_city_dist_km)
     if far:
         logger.warning(
