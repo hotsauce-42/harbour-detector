@@ -26,6 +26,11 @@ from streamlit.testing.v1 import AppTest
 
 import app
 from utils import map_assets
+from utils.overrides import (
+    DETECTED_TRANSIT_KEY,
+    MANUAL_TRANSIT_KEY,
+    manual_transit,
+)
 from utils.geo import merge_outlines
 
 RES = 11
@@ -867,3 +872,129 @@ def test_the_city_view_survives_the_click_that_uses_it(city_outputs,
     at = at.run()
 
     assert at.toggle(key="city_view").value is True
+
+
+# ---------------------------------------------------------------------------
+# Lock flag: display, the map view, and the manual verdict
+# ---------------------------------------------------------------------------
+
+def _lock_feature(hid: str, geom, *, detected: bool = False,
+                  manual=None) -> dict:
+    feat = _city_feature(hid, geom, "Kiel", "DE")
+    feat["properties"].update({
+        "mean_dwell_minutes":   37.0,
+        "max_visits_per_mmsi":  1,
+        "n_cargo":              15,
+        "n_tanker":             6,
+        "transit_like":         detected if manual is None else manual,
+        DETECTED_TRANSIT_KEY:   detected,
+    })
+    if manual is not None:
+        feat["properties"][MANUAL_TRANSIT_KEY] = manual
+    return feat
+
+
+# -- the effective verdict --------------------------------------------------
+
+def test_a_detected_lock_reads_as_a_lock():
+    feat = _lock_feature("DE-lock", box(10.1, 54.3, 10.2, 54.4), detected=True)
+    assert app.is_transit(feat["properties"]) is True
+
+
+def test_an_operator_can_overrule_the_detector_both_ways():
+    """
+    The whole point of the control: a person outranks the heuristic, in either
+    direction. Both cases matter — one rescues a false positive, the other
+    catches a lock the detector missed.
+    """
+    cleared = _lock_feature("DE-a", box(10.1, 54.3, 10.2, 54.4),
+                            detected=True, manual=False)
+    promoted = _lock_feature("DE-b", box(10.3, 54.3, 10.4, 54.4),
+                             detected=False, manual=True)
+
+    assert app.is_transit(cleared["properties"]) is False
+    assert app.is_transit(promoted["properties"]) is True
+
+
+def test_no_verdict_means_the_detector_still_decides():
+    """`manual_transit_like` absent is not the same as False."""
+    feat = _lock_feature("DE-lock", box(10.1, 54.3, 10.2, 54.4), detected=True)
+
+    assert manual_transit(feat["properties"]) is None
+    assert app.is_transit(feat["properties"]) is True
+
+
+def test_transit_harbours_finds_every_flagged_site():
+    features = [
+        _lock_feature("DE-a", box(10.1, 54.3, 10.2, 54.4), detected=True),
+        _city_feature("DE-b", box(9.9, 53.5, 9.94, 53.54), "Hamburg", "DE"),
+        _lock_feature("DE-c", box(9.1, 53.8, 9.2, 53.9), detected=False,
+                      manual=True),
+    ]
+    assert app.transit_harbours(features) == [0, 2]
+
+
+def test_the_popup_says_when_a_site_is_flagged():
+    flagged = _lock_feature("DE-a", box(10.1, 54.3, 10.2, 54.4), detected=True)
+    plain = _city_feature("DE-b", box(9.9, 53.5, 9.94, 53.54), "Hamburg", "DE")
+
+    assert app.TRANSIT_BADGE in app._popup_html(flagged["properties"])
+    assert app.TRANSIT_BADGE not in app._popup_html(plain["properties"])
+
+
+# -- persistence ------------------------------------------------------------
+
+def _write_outputs(tmp_path: Path, features: list[dict]) -> tuple[Path, Path]:
+    outline = tmp_path / "harbours.geojson"
+    cells = tmp_path / "harbours_cells.geojson"
+    for path in (outline, cells):
+        path.write_text(json.dumps(
+            {"type": "FeatureCollection", "features": features}
+        ))
+    return outline, cells
+
+
+def test_saving_a_verdict_writes_it_to_every_output_file(tmp_path):
+    """
+    Both files carry the same properties, and either can be the existing
+    database on the next run — so a verdict written to only one would be lost
+    depending on which was pointed at.
+    """
+    feat = _lock_feature("DE-lock", box(10.1, 54.3, 10.2, 54.4), detected=False)
+    outline, cells = _write_outputs(tmp_path, [feat])
+
+    written = app.save_harbour_transit([str(outline), str(cells)], "DE-lock", True)
+
+    assert len(written) == 2
+    for path in (outline, cells):
+        props = json.loads(path.read_text())["features"][0]["properties"]
+        assert props[MANUAL_TRANSIT_KEY] is True
+        assert props["transit_like"] is True
+
+
+def test_clearing_a_verdict_removes_the_property_rather_than_storing_false(tmp_path):
+    """
+    Back to Auto. Storing False would freeze the detector out for good, which
+    is a different decision from "no opinion".
+    """
+    feat = _lock_feature("DE-lock", box(10.1, 54.3, 10.2, 54.4),
+                         detected=True, manual=False)
+    outline, cells = _write_outputs(tmp_path, [feat])
+
+    app.save_harbour_transit([str(outline), str(cells)], "DE-lock", None)
+
+    props = json.loads(outline.read_text())["features"][0]["properties"]
+    assert MANUAL_TRANSIT_KEY not in props
+    # …and the effective flag falls back to what was detected.
+    assert props["transit_like"] is True
+
+
+def test_a_cleared_verdict_survives_a_round_trip_through_phase5(tmp_path):
+    """`manual_transit` has to read back what the GUI wrote, in every shape."""
+    feat = _lock_feature("DE-lock", box(10.1, 54.3, 10.2, 54.4), detected=True)
+    outline, cells = _write_outputs(tmp_path, [feat])
+    app.save_harbour_transit([str(outline), str(cells)], "DE-lock", False)
+
+    props = json.loads(outline.read_text())["features"][0]["properties"]
+    assert manual_transit(props) is False
+    assert app.is_transit(props) is False

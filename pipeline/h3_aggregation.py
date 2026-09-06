@@ -77,6 +77,15 @@ class Phase2Config:
 
 
 # AIS ship type → simplified category
+# The per-vessel-type stop counts this phase produces. Named here, next to the
+# schema that creates them, so Phases 3-5 carry the same set without each
+# keeping its own copy of the list.
+VESSEL_COUNTS = (
+    "n_cargo", "n_tanker", "n_passenger",
+    "n_fishing", "n_recreational", "n_tug_pilot",
+)
+
+
 def _classify_ship_type(ship_type) -> str:
     try:
         t = int(ship_type)

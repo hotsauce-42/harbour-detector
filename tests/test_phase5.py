@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Optional
 
 import h3
+import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -15,6 +16,8 @@ from shapely.wkt import loads as from_wkt
 
 from pipeline.enrichment import ENRICHED_SCHEMA
 from pipeline.id_matching import (
+    _load_existing_db,
+    cell_list,
     Phase5Config,
     _apply_manual_outlines,
     _assign_ids,
@@ -25,7 +28,12 @@ from pipeline.id_matching import (
     make_harbour_id,
     run_phase5,
 )
-from utils.overrides import DETECTED_OUTLINE_KEY, MANUAL_OUTLINE_KEY
+from utils.overrides import (
+    DETECTED_OUTLINE_KEY,
+    DETECTED_TRANSIT_KEY,
+    MANUAL_OUTLINE_KEY,
+    MANUAL_TRANSIT_KEY,
+)
 
 RES = 11
 HAMBURG_LAT,   HAMBURG_LON   = 53.54,  9.97
@@ -48,9 +56,19 @@ def _enriched_row(cluster_id: int, lat: float, lon: float) -> dict:
         "n_events":             50,
         "n_unique_mmsi":        15,
         "n_draught_changes":    2,
+        # Carried through from Phase 4; an ordinary harbour, not a transit site.
+        "mean_dwell_minutes":   400.0,
+        "max_visits_per_mmsi":  8,
+        "n_cargo":              0,
+        "n_tanker":             0,
+        "n_passenger":          0,
+        "n_fishing":            0,
+        "n_recreational":       30,
+        "n_tug_pilot":          0,
+        "transit_like":         False,
         "centroid_lat":         lat,
         "centroid_lon":         lon,
-        "centroid_h3_r8":       h3.latlng_to_cell(lat, lon, 8),
+        "centroid_id_cell":       h3.latlng_to_cell(lat, lon, 8),
         "bbox_min_lat":         lat - 0.001,
         "bbox_max_lat":         lat + 0.001,
         "bbox_min_lon":         lon - 0.001,
@@ -134,7 +152,7 @@ def test_build_indexes_maps_cells():
         "centroid_lon": HAMBURG_LON,
         "h3_cells":     cells,
     }])
-    cell_idx, centroid_list, _, _ = _build_indexes(existing)
+    cell_idx, centroid_list, *_ = _build_indexes(existing)
     for cell in cells:
         assert cell_idx[cell] == "existing-123"
 
@@ -147,7 +165,7 @@ def test_find_match_by_jaccard():
         "centroid_lon": HAMBURG_LON,
         "h3_cells":     list(cells),
     }])
-    cell_idx, centroid_list, _, _ = _build_indexes(existing)
+    cell_idx, centroid_list, *_ = _build_indexes(existing)
     config = Phase5Config(interim_dir="", output_dir="",
                           h3_jaccard_threshold=0.3,
                           centroid_match_distance_meters=500.0)
@@ -164,7 +182,7 @@ def test_find_match_by_centroid_distance():
         "centroid_lat": HAMBURG_LAT + 0.001,   # ~100m away
         "centroid_lon": HAMBURG_LON,
     }])
-    cell_idx, centroid_list, _, _ = _build_indexes(existing)
+    cell_idx, centroid_list, *_ = _build_indexes(existing)
     config = Phase5Config(interim_dir="", output_dir="",
                           centroid_match_distance_meters=500.0)
 
@@ -179,7 +197,7 @@ def test_find_match_returns_none_when_too_far():
         "centroid_lat": ROTTERDAM_LAT,
         "centroid_lon": ROTTERDAM_LON,
     }])
-    cell_idx, centroid_list, _, _ = _build_indexes(existing)
+    cell_idx, centroid_list, *_ = _build_indexes(existing)
     config = Phase5Config(interim_dir="", output_dir="",
                           centroid_match_distance_meters=500.0)
 
@@ -198,7 +216,7 @@ def test_assign_ids_reuses_existing():
         "centroid_lon": HAMBURG_LON,
         "h3_cells":     row["h3_cells"],
     }])
-    cell_idx, centroid_list, _, _ = _build_indexes(existing)
+    cell_idx, centroid_list, *_ = _build_indexes(existing)
 
     config = Phase5Config(interim_dir="", output_dir="")
     result = _assign_ids(enriched, cell_idx, centroid_list, config)
@@ -212,7 +230,7 @@ def test_assign_ids_generates_new_when_no_match():
     config = Phase5Config(interim_dir="", output_dir="")
 
     result = _assign_ids(enriched, {}, [], config)
-    expected = make_harbour_id(row["centroid_h3_r8"], row["country_iso2"])
+    expected = make_harbour_id(row["centroid_id_cell"], row["country_iso2"])
     assert result.iloc[0]["harbour_id"] == expected
     assert not result.iloc[0]["matched_existing"]
 
@@ -360,7 +378,7 @@ def test_assign_ids_applies_manual_overrides_on_match():
         "nearest_city":     "Hamburg-Altona",
         "manual_overrides": ["nearest_city"],
     }])
-    cell_idx, centroid_list, overrides, _ = _build_indexes(existing)
+    cell_idx, centroid_list, overrides, *_ = _build_indexes(existing)
 
     config = Phase5Config(interim_dir="", output_dir="")
     result = _assign_ids(enriched, cell_idx, centroid_list, config, overrides)
@@ -382,7 +400,7 @@ def test_assign_ids_ignores_unmarked_existing_values():
         "h3_cells":     row["h3_cells"],
         "nearest_city": "Stale Name",       # present, but not marked
     }])
-    cell_idx, centroid_list, overrides, _ = _build_indexes(existing)
+    cell_idx, centroid_list, overrides, *_ = _build_indexes(existing)
 
     config = Phase5Config(interim_dir="", output_dir="")
     result = _assign_ids(enriched, cell_idx, centroid_list, config, overrides)
@@ -412,7 +430,7 @@ def test_assign_ids_override_applies_only_to_matching_row():
         "nearest_city":     "Rotterdam-Maasvlakte",
         "manual_overrides": ["nearest_city"],
     }])
-    cell_idx, centroid_list, overrides, _ = _build_indexes(existing)
+    cell_idx, centroid_list, overrides, *_ = _build_indexes(existing)
 
     config = Phase5Config(interim_dir="", output_dir="")
     result = _assign_ids(enriched, cell_idx, centroid_list, config, overrides)
@@ -569,7 +587,7 @@ def test_build_indexes_collects_manual_outlines():
         {"harbour_id": "DE-plain", MANUAL_OUTLINE_KEY: None},
     ])
 
-    *_, outlines = _build_indexes(existing)
+    *_, outlines, _transit = _build_indexes(existing)
 
     assert outlines == {"DE-drawn": drawn}
 
@@ -586,7 +604,7 @@ def test_assign_ids_attaches_a_manual_outline_only_to_the_matched_harbour():
         "h3_cells":         hh["h3_cells"],
         MANUAL_OUTLINE_KEY: to_wkt(box(9.9, 53.5, 9.91, 53.51)),
     }])
-    cell_idx, centroid_list, overrides, outlines = _build_indexes(existing)
+    cell_idx, centroid_list, overrides, outlines, _t = _build_indexes(existing)
 
     config = Phase5Config(interim_dir="", output_dir="")
     result = _assign_ids(enriched, cell_idx, centroid_list, config,
@@ -658,3 +676,248 @@ def test_run_phase5_leaves_the_outline_columns_null_for_new_harbours(tmp_path):
     with open(geojson_path, encoding="utf-8") as f:
         props = json.load(f)["features"][0]["properties"]
     assert props[MANUAL_OUTLINE_KEY] is None
+
+
+# ---------------------------------------------------------------------------
+# The operator's lock verdict, round-tripped
+# ---------------------------------------------------------------------------
+
+def _transit_run(tmp_path, *, detected: bool, stored) -> pd.Series:
+    """Run Phase 5 with a stored verdict over a given detected one."""
+    row = _enriched_row(0, HAMBURG_LAT, HAMBURG_LON)
+    outline = _detected_outline(HAMBURG_LAT, HAMBURG_LON)
+    row["geometry_wkt"] = outline
+    row["outline_wkt"] = outline
+    row["transit_like"] = detected
+    _write_enriched([row], tmp_path / "harbours_enriched.parquet")
+
+    record = {
+        "harbour_id":   "legacy-hh-001",
+        "centroid_lat": HAMBURG_LAT,
+        "centroid_lon": HAMBURG_LON,
+        "h3_cells":     row["h3_cells"],
+    }
+    if stored is not None:
+        record[MANUAL_TRANSIT_KEY] = stored
+    db_path = tmp_path / "existing.geojson"
+    _existing_db_geojson(db_path, record)
+
+    parquet_path, _, _ = run_phase5(_base_config(tmp_path, existing_db=str(db_path)))
+    return pd.read_parquet(parquet_path).iloc[0]
+
+
+def test_a_stored_verdict_promotes_a_site_the_detector_missed(tmp_path):
+    row = _transit_run(tmp_path, detected=False, stored=True)
+
+    assert bool(row["transit_like"]) is True
+    assert bool(row[DETECTED_TRANSIT_KEY]) is False   # what Phase 4 thought
+    assert bool(row[MANUAL_TRANSIT_KEY]) is True
+
+
+def test_a_stored_verdict_clears_a_false_positive(tmp_path):
+    """
+    The direction that matters most: a person overruling a heuristic that
+    flagged a real harbour, and having it stay overruled on every future run.
+    """
+    row = _transit_run(tmp_path, detected=True, stored=False)
+
+    assert bool(row["transit_like"]) is False
+    assert bool(row[DETECTED_TRANSIT_KEY]) is True
+
+
+def test_without_a_stored_verdict_the_detector_stands(tmp_path):
+    row = _transit_run(tmp_path, detected=True, stored=None)
+
+    assert bool(row["transit_like"]) is True
+    assert pd.isna(row[MANUAL_TRANSIT_KEY])
+
+
+def test_a_new_harbour_carries_no_verdict(tmp_path):
+    """Nothing to inherit when there is no existing record to inherit from."""
+    row = _enriched_row(0, HAMBURG_LAT, HAMBURG_LON)
+    outline = _detected_outline(HAMBURG_LAT, HAMBURG_LON)
+    row["geometry_wkt"] = outline
+    row["outline_wkt"] = outline
+    row["transit_like"] = True
+    _write_enriched([row], tmp_path / "harbours_enriched.parquet")
+
+    parquet_path, _, _ = run_phase5(_base_config(tmp_path))
+    result = pd.read_parquet(parquet_path).iloc[0]
+
+    assert pd.isna(result[MANUAL_TRANSIT_KEY])
+    assert bool(result["transit_like"]) is True
+
+
+def test_centroid_match_takes_the_nearest_not_the_first():
+    """
+    Two existing harbours inside the 500 m radius, the exact match listed
+    second. Walking the list and accepting the first hit picked a 496 m
+    neighbour over a 0 m match on real data, orphaning one id and giving
+    another to two clusters at once.
+    """
+    lat, lon = HAMBURG_LAT, HAMBURG_LON
+    centroid_list = [
+        # ~400 m north, and listed first
+        {"harbour_id": "near-miss", "centroid_lat": lat + 0.0036,
+         "centroid_lon": lon, "h3_cells": []},
+        {"harbour_id": "exact", "centroid_lat": lat,
+         "centroid_lon": lon, "h3_cells": []},
+    ]
+    config = _base_config(Path("."))
+
+    assert _find_match(set(), lat, lon, {}, centroid_list, config) == "exact"
+
+
+def test_centroid_match_still_returns_nothing_when_everything_is_too_far():
+    lat, lon = HAMBURG_LAT, HAMBURG_LON
+    centroid_list = [
+        {"harbour_id": "far", "centroid_lat": lat + 0.05,
+         "centroid_lon": lon, "h3_cells": []},
+    ]
+    assert _find_match(set(), lat, lon, {}, centroid_list,
+                       _base_config(Path("."))) is None
+
+
+# ---------------------------------------------------------------------------
+# h3_cells survives a Parquet round-trip
+# ---------------------------------------------------------------------------
+
+def test_cell_list_accepts_what_parquet_actually_hands_back():
+    """
+    The shape that broke everything: a Parquet round-trip returns a numpy
+    array, and `isinstance(ndarray, (list, tuple))` is False. Testing for
+    list/tuple treated every Parquet-loaded harbour as cell-less, which fed
+    `_find_match` an empty set (so Jaccard matching could never fire) and wrote
+    `"h3_cells": []` into both GeoJSON outputs.
+    """
+    cells = ["8b1f05908259fff", "8b1f0590824afff"]
+
+    assert cell_list(np.array(cells, dtype=object)) == cells
+    assert cell_list(np.array(cells)) == cells          # numpy str dtype
+    assert cell_list(cells) == cells
+    assert cell_list(tuple(cells)) == cells
+
+
+def test_cell_list_treats_every_shape_of_missing_as_no_cells():
+    assert cell_list(None) == []
+    assert cell_list(float("nan")) == []
+    assert cell_list([]) == []
+
+
+def test_the_geojson_carries_the_cells_it_was_built_from(tmp_path):
+    """
+    Both outputs are documented as usable as the existing database, so cells
+    have to reach them — otherwise a database built from one silently falls
+    back to centroid-only matching.
+    """
+    row = _enriched_row(0, HAMBURG_LAT, HAMBURG_LON)
+    outline = _detected_outline(HAMBURG_LAT, HAMBURG_LON)
+    row["geometry_wkt"] = outline
+    row["outline_wkt"] = outline
+    _write_enriched([row], tmp_path / "harbours_enriched.parquet")
+
+    _, geojson_path, cells_path = run_phase5(_base_config(tmp_path))
+
+    for path in (geojson_path, cells_path):
+        feature = json.loads(Path(path).read_text())["features"][0]
+        assert feature["properties"]["h3_cells"] == sorted(row["h3_cells"])
+
+
+def test_a_database_written_by_phase5_can_drive_jaccard_matching(tmp_path):
+    """The round trip that matters: output → existing DB → cell index."""
+    row = _enriched_row(0, HAMBURG_LAT, HAMBURG_LON)
+    outline = _detected_outline(HAMBURG_LAT, HAMBURG_LON)
+    row["geometry_wkt"] = outline
+    row["outline_wkt"] = outline
+    _write_enriched([row], tmp_path / "harbours_enriched.parquet")
+    _, geojson_path, _ = run_phase5(_base_config(tmp_path))
+
+    cell_index, _, *_ = _build_indexes(_load_existing_db(str(geojson_path), {}))
+
+    assert len(cell_index) == len(row["h3_cells"])
+
+
+# ---------------------------------------------------------------------------
+# An existing harbour can only be claimed once
+# ---------------------------------------------------------------------------
+
+def _two_clusters_near(lat: float, lon: float, offset: float) -> pd.DataFrame:
+    """Two clusters, the second `offset` degrees north of the first."""
+    return pd.DataFrame([
+        _enriched_row(0, lat, lon),
+        _enriched_row(1, lat + offset, lon),
+    ])
+
+
+def test_two_clusters_cannot_share_one_existing_harbour():
+    """
+    500 m is generous next to how close real harbours get — two Hellerup
+    basins are 442 m apart — so both fall inside one existing harbour's radius.
+    Letting both match hands them the same id and seeds a duplicate that
+    re-matches both clusters on every later run.
+    """
+    enriched = _two_clusters_near(HAMBURG_LAT, HAMBURG_LON, 0.003)   # ~330 m
+    centroid_list = [{"harbour_id": "existing", "centroid_lat": HAMBURG_LAT,
+                      "centroid_lon": HAMBURG_LON, "h3_cells": []}]
+
+    result = _assign_ids(enriched, {}, centroid_list, _base_config(Path(".")))
+
+    assert result["harbour_id"].nunique() == 2
+    # The nearer cluster keeps it; the other is issued a fresh id.
+    assert result.iloc[0]["harbour_id"] == "existing"
+    assert bool(result.iloc[0]["matched_existing"]) is True
+    assert result.iloc[1]["harbour_id"] != "existing"
+    assert bool(result.iloc[1]["matched_existing"]) is False
+
+
+def test_the_closer_cluster_wins_whichever_order_they_arrive_in():
+    """The winner is decided by match quality, not by row order."""
+    enriched = pd.DataFrame([
+        _enriched_row(0, HAMBURG_LAT + 0.003, HAMBURG_LON),   # further away
+        _enriched_row(1, HAMBURG_LAT, HAMBURG_LON),           # exact
+    ])
+    centroid_list = [{"harbour_id": "existing", "centroid_lat": HAMBURG_LAT,
+                      "centroid_lon": HAMBURG_LON, "h3_cells": []}]
+
+    result = _assign_ids(enriched, {}, centroid_list, _base_config(Path(".")))
+
+    assert result.iloc[1]["harbour_id"] == "existing"
+    assert result.iloc[0]["harbour_id"] != "existing"
+
+
+def test_an_h3_overlap_claim_outranks_a_centroid_only_claim():
+    """
+    Sharing cells with an existing harbour is stronger evidence than merely
+    being near its centroid, so it wins the contest even from further away.
+    """
+    far = _enriched_row(0, HAMBURG_LAT + 0.004, HAMBURG_LON)   # ~445 m, shares cells
+    near = _enriched_row(1, HAMBURG_LAT, HAMBURG_LON)          # 0 m, no overlap
+    enriched = pd.DataFrame([far, near])
+
+    cell_index = {cell: "existing" for cell in far["h3_cells"]}
+    centroid_list = [{"harbour_id": "existing",
+                      "centroid_lat": HAMBURG_LAT + 0.004,
+                      "centroid_lon": HAMBURG_LON,
+                      "h3_cells": far["h3_cells"]}]
+
+    result = _assign_ids(enriched, cell_index, centroid_list,
+                         _base_config(Path(".")))
+
+    assert result.iloc[0]["harbour_id"] == "existing"
+    assert result.iloc[1]["harbour_id"] != "existing"
+
+
+def test_uncontested_matching_is_unchanged():
+    """Two clusters, two existing harbours, one each — nothing to resolve."""
+    enriched = _two_clusters_near(HAMBURG_LAT, HAMBURG_LON, 0.05)   # far apart
+    centroid_list = [
+        {"harbour_id": "a", "centroid_lat": HAMBURG_LAT,
+         "centroid_lon": HAMBURG_LON, "h3_cells": []},
+        {"harbour_id": "b", "centroid_lat": HAMBURG_LAT + 0.05,
+         "centroid_lon": HAMBURG_LON, "h3_cells": []},
+    ]
+
+    result = _assign_ids(enriched, {}, centroid_list, _base_config(Path(".")))
+
+    assert list(result["harbour_id"]) == ["a", "b"]
+    assert [bool(v) for v in result["matched_existing"]] == [True, True]

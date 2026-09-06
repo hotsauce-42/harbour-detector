@@ -31,12 +31,16 @@ from shapely.wkt import dumps as to_wkt
 from shapely.wkt import loads as from_wkt
 
 from utils.geo import haversine_meters, merge_outlines
+from pipeline.h3_aggregation import VESSEL_COUNTS
 from utils.overrides import (
+    DETECTED_TRANSIT_KEY,
+    MANUAL_TRANSIT_KEY,
     DETECTED_OUTLINE_KEY,
     EDITABLE_FIELDS,
     MANUAL_OUTLINE_KEY,
     OVERRIDES_KEY,
     manual_outline,
+    manual_transit,
     normalise_overrides,
     override_values,
 )
@@ -62,6 +66,17 @@ OUTPUT_SCHEMA = pa.schema([
     pa.field("n_events",               pa.int32()),
     pa.field("n_unique_mmsi",          pa.int32()),
     pa.field("n_draught_changes",      pa.int32()),
+    # Behavioural signature and vessel mix, from Phase 3 via Phase 4.
+    pa.field("mean_dwell_minutes",     pa.float64()),
+    pa.field("max_visits_per_mmsi",    pa.int32()),
+    pa.field("n_cargo",                pa.int32()),
+    pa.field("n_tanker",               pa.int32()),
+    pa.field("n_passenger",            pa.int32()),
+    pa.field("n_fishing",              pa.int32()),
+    pa.field("n_recreational",         pa.int32()),
+    pa.field("n_tug_pilot",            pa.int32()),
+    # Effective verdict: an operator's, when they gave one, else Phase 4's.
+    pa.field("transit_like",           pa.bool_()),
     pa.field("centroid_lat",           pa.float64()),
     pa.field("centroid_lon",           pa.float64()),
     pa.field("country_iso2",           pa.string()),
@@ -79,6 +94,12 @@ OUTPUT_SCHEMA = pa.schema([
     # Phase 4's outline before the manual one was merged in. outline_wkt is the
     # union of the two, so this is what a GUI revert falls back to.
     pa.field("detected_outline_wkt",   pa.string()),
+    # The operator's lock verdict, tri-state: null means they had no opinion
+    # and transit_like is simply Phase 4's. Unlike the outline this replaces
+    # rather than merges — a human overruling a heuristic is the whole point.
+    pa.field("manual_transit_like",    pa.bool_()),
+    # Phase 4's own verdict, so the GUI can show what was detected and revert.
+    pa.field("detected_transit_like",  pa.bool_()),
 ])
 
 
@@ -116,7 +137,7 @@ class Phase5Config:
 # Deterministic ID generation
 # ---------------------------------------------------------------------------
 
-def make_harbour_id(centroid_h3_r8: str, country_iso2: str | None = None) -> str:
+def make_harbour_id(centroid_cell: str, country_iso2: str | None = None) -> str:
     """
     Deterministic harbour ID: '{CC}-{hex8}' where CC is the ISO 3166-1 alpha-2
     country code and hex8 is the first 8 hex chars of the UUID5 of the centroid
@@ -125,7 +146,7 @@ def make_harbour_id(centroid_h3_r8: str, country_iso2: str | None = None) -> str
     Examples: 'DE-b8d7e3a2', 'NL-4c2e1af3', 'ZZ-9a6d3c7f'
     """
     prefix = (country_iso2 or "").strip().upper() or "ZZ"
-    hex8   = uuid.uuid5(_HARBOUR_NS, centroid_h3_r8).hex[:8]
+    hex8   = uuid.uuid5(_HARBOUR_NS, centroid_cell).hex[:8]
     return f"{prefix}-{hex8}"
 
 
@@ -198,24 +219,50 @@ def _geojson_to_df(fc: dict) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def cell_list(value) -> list[str]:
+    """
+    Coerce a stored `h3_cells` value into a plain list of cell strings.
+
+    A Parquet round-trip hands back a **numpy array**, not a list, and
+    `isinstance(ndarray, (list, tuple))` is False. Testing for list/tuple
+    therefore treated every Parquet-loaded harbour as having no cells at all,
+    which silently (a) fed `_find_match` an empty set so the H3 Jaccard
+    strategy could never fire, and (b) wrote `"h3_cells": []` into both
+    GeoJSON outputs — so a database built from one carried no cells either,
+    and matching everywhere fell back to centroid distance alone.
+    """
+    if value is None:
+        return []
+    if isinstance(value, float):        # NaN, the null a Parquet column leaves
+        return []
+    try:
+        return [str(cell) for cell in value]
+    except TypeError:
+        return []
+
+
 # ---------------------------------------------------------------------------
 # Build lookup indexes from existing DB
 # ---------------------------------------------------------------------------
 
 def _build_indexes(
     existing: pd.DataFrame,
-) -> tuple[dict[str, str], list[dict], dict[str, dict], dict[str, str]]:
+) -> tuple[
+    dict[str, str], list[dict], dict[str, dict], dict[str, str], dict[str, bool],
+]:
     """
     Returns:
       cell_index      : h3_cell → harbour_id  (for Jaccard matching)
       centroid_list   : list of {harbour_id, centroid_lat, centroid_lon, h3_cells}
       overrides_by_id : harbour_id → {field: manually corrected value}
       outlines_by_id  : harbour_id → manually drawn outline WKT
+      transit_by_id   : harbour_id → the operator's lock verdict (True or False)
     """
     cell_index: dict[str, str] = {}
     centroid_list: list[dict] = []
     overrides_by_id: dict[str, dict] = {}
     outlines_by_id: dict[str, str] = {}
+    transit_by_id: dict[str, bool] = {}
 
     has_cells = "h3_cells" in existing.columns
 
@@ -231,8 +278,14 @@ def _build_indexes(
         if drawn:
             outlines_by_id[hid] = drawn
 
-        if has_cells and isinstance(row["h3_cells"], (list, tuple)):
-            cells = list(row["h3_cells"])
+        # Tri-state: only an actual verdict is stored, so False ("checked, not
+        # a lock") is kept and "nobody looked" is not.
+        verdict = manual_transit(row)
+        if verdict is not None:
+            transit_by_id[hid] = verdict
+
+        if has_cells:
+            cells = cell_list(row["h3_cells"])
             for cell in cells:
                 cell_index[cell] = hid
 
@@ -254,8 +307,12 @@ def _build_indexes(
     if outlines_by_id:
         logger.info("Existing DB carries manually drawn outlines for %d harbours",
                     len(outlines_by_id))
+    if transit_by_id:
+        logger.info("Existing DB carries manual lock verdicts for %d harbours",
+                    len(transit_by_id))
 
-    return cell_index, centroid_list, overrides_by_id, outlines_by_id
+    return (cell_index, centroid_list, overrides_by_id, outlines_by_id,
+            transit_by_id)
 
 
 # ---------------------------------------------------------------------------
@@ -267,23 +324,36 @@ def _jaccard(set_a: set, set_b: set) -> float:
     return len(set_a & set_b) / len(union) if union else 0.0
 
 
-def _find_match(
+def _rank_match(
     new_cells: set[str],
     new_lat: float,
     new_lon: float,
     cell_index: dict[str, str],
     centroid_list: list[dict],
     config: Phase5Config,
-) -> Optional[str]:
+) -> Optional[tuple[str, tuple]]:
     """
-    Return the matched existing harbour_id, or None if no match is found.
+    The best existing harbour for this cluster, with a comparable quality.
+
+    Returns `(harbour_id, quality)` where a *smaller* quality is a better
+    claim, so competing clusters can be ranked against each other:
+
+        (0, -jaccard)  an H3 overlap match — stronger evidence, so it outranks
+        (1, distance)  any centroid-only match
+
+    `_assign_ids` needs the quality because an existing harbour can only be
+    claimed once; on its own, use `_find_match`.
 
     Strategy A — H3 Jaccard:
       Use the cell_index to collect candidate existing harbour_ids (any cell overlap),
       compute Jaccard for the best candidate, accept if >= threshold.
 
     Strategy B — centroid distance:
-      Walk centroid_list and accept the first entry within the distance threshold.
+      The *nearest* existing centroid within the distance threshold. Nearest,
+      not first: two existing harbours can both fall inside the radius, and
+      taking whichever the database happened to list earlier picked a 495.8 m
+      neighbour over a 0.0 m exact match on a real run, orphaning one harbour's
+      id and handing another's to two clusters at once.
     """
     # --- Strategy A ---
     if cell_index:
@@ -298,20 +368,40 @@ def _find_match(
             # Find full record for best candidate
             best = next((e for e in centroid_list if e["harbour_id"] == best_id), None)
             if best and best["h3_cells"]:
-                score = _jaccard(new_cells, best["h3_cells"])
+                # set(): centroid_list stores cells as a list, and _jaccard
+                # needs two sets — `set | list` raises. Latent until the
+                # h3_cells coercion fix let Strategy A fire for the first time.
+                score = _jaccard(new_cells, set(best["h3_cells"]))
                 if score >= config.h3_jaccard_threshold:
-                    return best_id
+                    return best_id, (0, -score)
 
     # --- Strategy B ---
+    nearest_id, nearest_dist = None, None
     for entry in centroid_list:
         if entry["centroid_lat"] is None or entry["centroid_lon"] is None:
             continue
         dist = haversine_meters(new_lat, new_lon,
                                 entry["centroid_lat"], entry["centroid_lon"])
-        if dist <= config.centroid_match_distance_meters:
-            return entry["harbour_id"]
+        if dist > config.centroid_match_distance_meters:
+            continue
+        if nearest_dist is None or dist < nearest_dist:
+            nearest_id, nearest_dist = entry["harbour_id"], dist
 
-    return None
+    return None if nearest_id is None else (nearest_id, (1, nearest_dist))
+
+
+def _find_match(
+    new_cells: set[str],
+    new_lat: float,
+    new_lon: float,
+    cell_index: dict[str, str],
+    centroid_list: list[dict],
+    config: Phase5Config,
+) -> Optional[str]:
+    """The matched existing harbour_id, ignoring how good the match was."""
+    found = _rank_match(new_cells, new_lat, new_lon,
+                        cell_index, centroid_list, config)
+    return None if found is None else found[0]
 
 
 # ---------------------------------------------------------------------------
@@ -325,6 +415,7 @@ def _assign_ids(
     config: Phase5Config,
     overrides_by_id: Optional[dict[str, dict]] = None,
     outlines_by_id: Optional[dict[str, str]] = None,
+    transit_by_id: Optional[dict[str, bool]] = None,
 ) -> pd.DataFrame:
     """
     Assign a harbour_id to every cluster and re-apply manual corrections.
@@ -336,14 +427,20 @@ def _assign_ids(
     A manually drawn outline is attached here but merged later, in
     `_apply_manual_outlines`: matching itself always runs against the freshly
     detected geometry.
+
+    A stored lock verdict is attached the same way and applied in
+    `_apply_manual_transit`, where it *replaces* Phase 4's rather than merging
+    with it.
     """
     overrides_by_id = overrides_by_id or {}
     outlines_by_id  = outlines_by_id or {}
+    transit_by_id   = transit_by_id or {}
 
     harbour_ids     = []
     matched_flags   = []
     override_lists  = []
     manual_outlines: list[Optional[str]] = []
+    manual_transits: list[Optional[bool]] = []
     # column → {row position → corrected value}, applied after the loop so the
     # matching itself always runs against the freshly geocoded data.
     patches: dict[str, dict[int, object]] = {}
@@ -352,18 +449,43 @@ def _assign_ids(
     n_new        = 0
     n_overridden = 0
 
+    # Pass 1 — what each cluster would like to claim, and how good the claim is.
+    wanted: dict[int, tuple[str, tuple]] = {}
     for pos, (_, row) in enumerate(enriched.iterrows()):
-        is_seq  = isinstance(row["h3_cells"], (list, tuple))
-        cells   = set(row["h3_cells"]) if is_seq else set()
-        clat    = float(row["centroid_lat"])
-        clon    = float(row["centroid_lon"])
+        found = _rank_match(
+            set(cell_list(row["h3_cells"])),
+            float(row["centroid_lat"]), float(row["centroid_lon"]),
+            cell_index, centroid_list, config,
+        )
+        if found is not None:
+            wanted[pos] = found
 
-        existing_id = _find_match(cells, clat, clon, cell_index, centroid_list, config)
+    # Pass 2 — an existing harbour can be claimed once. Two clusters landing on
+    # the same one is not rare: `centroid_match_distance_meters` is 500 m and
+    # real harbours get closer than that (two Hellerup basins are 442 m apart),
+    # so without this the pair share an id and the database grows a duplicate
+    # that re-matches both clusters on every later run.
+    best_claim: dict[str, tuple[tuple, int]] = {}
+    for pos, (existing_id, quality) in wanted.items():
+        if existing_id not in best_claim or quality < best_claim[existing_id][0]:
+            best_claim[existing_id] = (quality, pos)
+    winner_at = {pos: eid for eid, (_, pos) in best_claim.items()}
+
+    n_contested = len(wanted) - len(winner_at)
+    if n_contested:
+        logger.info(
+            "  %d cluster(s) lost a contested existing harbour to a closer "
+            "match and were given fresh ids", n_contested,
+        )
+
+    for pos, (_, row) in enumerate(enriched.iterrows()):
+        existing_id = winner_at.get(pos)
 
         if existing_id:
             harbour_ids.append(existing_id)
             matched_flags.append(True)
             manual_outlines.append(outlines_by_id.get(existing_id))
+            manual_transits.append(transit_by_id.get(existing_id))
             n_matched += 1
 
             corrected = overrides_by_id.get(existing_id, {})
@@ -375,11 +497,12 @@ def _assign_ids(
                 n_overridden += 1
         else:
             harbour_ids.append(
-                make_harbour_id(row["centroid_h3_r8"], row.get("country_iso2"))
+                make_harbour_id(row["centroid_id_cell"], row.get("country_iso2"))
             )
             matched_flags.append(False)
             override_lists.append([])
             manual_outlines.append(None)
+            manual_transits.append(None)
             n_new += 1
 
     logger.info(
@@ -405,7 +528,44 @@ def _assign_ids(
     enriched["matched_existing"]  = matched_flags
     enriched[OVERRIDES_KEY]       = override_lists
     enriched[MANUAL_OUTLINE_KEY]  = manual_outlines
+    enriched[MANUAL_TRANSIT_KEY]  = manual_transits
     return enriched
+
+
+def _apply_manual_transit(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Let an operator's lock verdict overrule Phase 4's.
+
+    Unlike the outline, which is merged, this replaces: the whole point of the
+    control is that a person can say "this is a lock" about something the
+    heuristic missed, or "this is not" about something it flagged. Phase 4's
+    verdict is preserved in `detected_transit_like` so the GUI can show both
+    and offer a revert.
+
+    A null verdict means nobody expressed one, and the detected value stands.
+    """
+    df = df.copy()
+    if "transit_like" not in df.columns:
+        df["transit_like"] = False
+    df[DETECTED_TRANSIT_KEY] = df["transit_like"].fillna(False).astype(bool)
+
+    if MANUAL_TRANSIT_KEY not in df.columns:
+        df[MANUAL_TRANSIT_KEY] = None
+        return df
+
+    verdicts = [manual_transit({MANUAL_TRANSIT_KEY: v})
+                for v in df[MANUAL_TRANSIT_KEY]]
+    df[MANUAL_TRANSIT_KEY] = verdicts
+    df["transit_like"] = [
+        detected if verdict is None else verdict
+        for detected, verdict in zip(df[DETECTED_TRANSIT_KEY], verdicts)
+    ]
+
+    n_applied = sum(1 for v in verdicts if v is not None)
+    if n_applied:
+        logger.info("  applied %d manual lock verdict(s) over the detected ones",
+                    n_applied)
+    return df
 
 
 def _apply_manual_outlines(
@@ -501,29 +661,34 @@ def _write_parquet(df: pd.DataFrame, out_dir: str, s3_cfg: dict) -> str:
         else df["outline_wkt"],
         type=pa.string(),
     )
+    # Nullable and tri-state: null is "no operator opinion", which is not the
+    # same as False. Written through manual_transit() so every round-trip shape
+    # of "missing" lands as null.
+    manual_transit_array = pa.array(
+        [manual_transit(row) for _, row in df.iterrows()], type=pa.bool_()
+    )
 
+    # Special-cased columns, then the rest straight off OUTPUT_SCHEMA so a new
+    # field cannot be added to the schema and silently dropped by the writer.
+    special = {
+        "h3_cells":             h3_cells_array,
+        "nearest_city_dist_km": dist_km_array,
+        OVERRIDES_KEY:          overrides_array,
+        MANUAL_OUTLINE_KEY:     manual_outline_array,
+        DETECTED_OUTLINE_KEY:   detected_outline_array,
+        MANUAL_TRANSIT_KEY:     manual_transit_array,
+    }
     table = pa.table(
         {
-            "harbour_id":        pa.array(df["harbour_id"],        type=pa.string()),
-            "cluster_id":        pa.array(df["cluster_id"],        type=pa.int32()),
-            "h3_cells":          h3_cells_array,
-            "n_cells":           pa.array(df["n_cells"],           type=pa.int32()),
-            "n_events":          pa.array(df["n_events"],          type=pa.int32()),
-            "n_unique_mmsi":     pa.array(df["n_unique_mmsi"],     type=pa.int32()),
-            "n_draught_changes": pa.array(df["n_draught_changes"], type=pa.int32()),
-            "centroid_lat":      pa.array(df["centroid_lat"],      type=pa.float64()),
-            "centroid_lon":      pa.array(df["centroid_lon"],      type=pa.float64()),
-            "country_iso2":      pa.array(df["country_iso2"],      type=pa.string()),
-            "country_name":      pa.array(df["country_name"],      type=pa.string()),
-            "nearest_city":      pa.array(df["nearest_city"],      type=pa.string()),
-            "nearest_city_dist_km": dist_km_array,
-            "admin1":            pa.array(df["admin1"],            type=pa.string()),
-            "geometry_wkt":      pa.array(df["geometry_wkt"],      type=pa.string()),
-            "outline_wkt":       pa.array(df["outline_wkt"],       type=pa.string()),
-            "matched_existing":  pa.array(df["matched_existing"],  type=pa.bool_()),
-            "manual_overrides":  overrides_array,
-            "manual_outline_wkt":   manual_outline_array,
-            "detected_outline_wkt": detected_outline_array,
+            field.name: special.get(
+                field.name,
+                pa.array(
+                    df[field.name] if field.name in df.columns
+                    else [None] * len(df),
+                    type=field.type,
+                ),
+            )
+            for field in OUTPUT_SCHEMA
         },
         schema=OUTPUT_SCHEMA,
     )
@@ -572,8 +737,7 @@ def _write_geojson(
                 logger.warning("Could not parse WKT for harbour %s: %s",
                                row["harbour_id"], exc)
 
-        is_seq = isinstance(row["h3_cells"], (list, tuple))
-        cells = list(row["h3_cells"]) if is_seq else []
+        cells = cell_list(row["h3_cells"])
 
         feature = {
             "type": "Feature",
@@ -586,6 +750,15 @@ def _write_geojson(
                 "n_events":               int(row["n_events"]),
                 "n_unique_mmsi":          int(row["n_unique_mmsi"]),
                 "n_draught_changes":      int(row["n_draught_changes"]),
+                "mean_dwell_minutes":     round(float(row["mean_dwell_minutes"]), 1),
+                "max_visits_per_mmsi":    int(row["max_visits_per_mmsi"]),
+                **{c: int(row[c]) for c in VESSEL_COUNTS},
+                # Effective verdict, then the two halves it came from, so the
+                # GUI can show what was detected and what a person decided.
+                "transit_like":           bool(row["transit_like"]),
+                "detected_transit_like":  bool(row.get(DETECTED_TRANSIT_KEY,
+                                                       row["transit_like"])),
+                "manual_transit_like":    manual_transit(row),
                 "centroid_lat":           float(row["centroid_lat"]),
                 "centroid_lon":           float(row["centroid_lon"]),
                 "country_iso2":           row["country_iso2"] or "",
@@ -659,12 +832,12 @@ def run_phase5(config: Phase5Config) -> tuple[str, str, str]:
     centroid_list:   list[dict]      = []
     overrides_by_id: dict[str, dict] = {}
     outlines_by_id:  dict[str, str]  = {}
+    transit_by_id:   dict[str, bool] = {}
 
     if config.existing_db_path:
         existing = _load_existing_db(config.existing_db_path, config.s3_cfg)
-        cell_index, centroid_list, overrides_by_id, outlines_by_id = _build_indexes(
-            existing
-        )
+        (cell_index, centroid_list, overrides_by_id, outlines_by_id,
+         transit_by_id) = _build_indexes(existing)
     else:
         logger.info(
             "No existing harbour DB supplied — all IDs will be newly generated."
@@ -672,8 +845,9 @@ def run_phase5(config: Phase5Config) -> tuple[str, str, str]:
 
     # Assign IDs, then merge in any outline an operator drew for a matched harbour
     result = _assign_ids(enriched, cell_index, centroid_list, config,
-                         overrides_by_id, outlines_by_id)
+                         overrides_by_id, outlines_by_id, transit_by_id)
     result = _apply_manual_outlines(result, fill_holes=config.outline_fill_holes)
+    result = _apply_manual_transit(result)
 
     # Write outputs
     ensure_dir(config.output_dir)

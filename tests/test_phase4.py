@@ -10,6 +10,7 @@ from shapely.wkt import loads as from_wkt
 
 from pipeline.cluster_formation import CLUSTER_SCHEMA
 from pipeline.enrichment import (
+    _flag_transit_sites,
     Phase4Config,
     _add_geocoding,
     _add_polygons,
@@ -36,9 +37,19 @@ def _cluster_row(cluster_id: int, lat: float, lon: float, n_cells: int = 7) -> d
         "n_events":             100,
         "n_unique_mmsi":        30,
         "n_draught_changes":    5,
+        # The behavioural signature Phase 3 now carries up. Defaults describe an
+        # ordinary harbour: long dwell, repeat visits, leisure traffic.
+        "mean_dwell_minutes":   400.0,
+        "max_visits_per_mmsi":  8,
+        "n_cargo":              0,
+        "n_tanker":             0,
+        "n_passenger":          0,
+        "n_fishing":            0,
+        "n_recreational":       30,
+        "n_tug_pilot":          0,
         "centroid_lat":         lat,
         "centroid_lon":         lon,
-        "centroid_h3_r8":       h3.latlng_to_cell(lat, lon, 8),
+        "centroid_id_cell":       h3.latlng_to_cell(lat, lon, 8),
         "bbox_min_lat":         lat - 0.001,
         "bbox_max_lat":         lat + 0.001,
         "bbox_min_lon":         lon - 0.001,
@@ -55,19 +66,11 @@ def _write_clusters_parquet(rows: list[dict], path: Path) -> None:
     h3_cells_array = pa.array(df["h3_cells"].tolist(), type=pa.list_(pa.string()))
     table = pa.table(
         {
-            "cluster_id":        pa.array(df["cluster_id"],        type=pa.int32()),
-            "h3_cells":          h3_cells_array,
-            "n_cells":           pa.array(df["n_cells"],           type=pa.int32()),
-            "n_events":          pa.array(df["n_events"],          type=pa.int32()),
-            "n_unique_mmsi":     pa.array(df["n_unique_mmsi"],     type=pa.int32()),
-            "n_draught_changes": pa.array(df["n_draught_changes"], type=pa.int32()),
-            "centroid_lat":      pa.array(df["centroid_lat"],      type=pa.float64()),
-            "centroid_lon":      pa.array(df["centroid_lon"],      type=pa.float64()),
-            "centroid_h3_r8":    pa.array(df["centroid_h3_r8"],    type=pa.string()),
-            "bbox_min_lat":      pa.array(df["bbox_min_lat"],      type=pa.float64()),
-            "bbox_max_lat":      pa.array(df["bbox_max_lat"],      type=pa.float64()),
-            "bbox_min_lon":      pa.array(df["bbox_min_lon"],      type=pa.float64()),
-            "bbox_max_lon":      pa.array(df["bbox_max_lon"],      type=pa.float64()),
+            field.name: (
+                h3_cells_array if field.name == "h3_cells"
+                else pa.array(df[field.name], type=field.type)
+            )
+            for field in CLUSTER_SCHEMA
         },
         schema=CLUSTER_SCHEMA,
     )
@@ -571,3 +574,101 @@ def test_the_city_wins_when_the_municipality_agrees(tmp_path):
     result = _add_geocoding(df, _port_city_config(path))
 
     assert result.iloc[0]["nearest_city"] == "Rostock"
+
+
+# ---------------------------------------------------------------------------
+# Transit sites — ship locks wearing a harbour's signature
+# ---------------------------------------------------------------------------
+
+def _site(cluster_id: int, *, dwell: float, visits: float, repeat: int,
+          cargo: int = 0, recreational: int = 0, mmsi: int = 20) -> dict:
+    """One row shaped like Phase 4 sees it, described by its behaviour."""
+    row = _cluster_row(cluster_id, HAMBURG_LAT, HAMBURG_LON)
+    row.update({
+        "mean_dwell_minutes":  dwell,
+        "n_unique_mmsi":       mmsi,
+        "n_events":            int(round(visits * mmsi)),
+        "max_visits_per_mmsi": repeat,
+        "n_cargo":             cargo,
+        "n_tanker":            0,
+        "n_passenger":         0,
+        "n_fishing":           0,
+        "n_recreational":      recreational,
+        "n_tug_pilot":         0,
+    })
+    return row
+
+
+def _harbours(n: int = 25) -> list[dict]:
+    """Enough ordinary harbours for the run's median to mean something."""
+    return [_site(i, dwell=400.0, visits=3.0, repeat=8, recreational=30)
+            for i in range(n)]
+
+
+def _flag(rows: list[dict], **kwargs) -> pd.DataFrame:
+    frame = pd.DataFrame(rows)
+    return _flag_transit_sites(frame, Phase4Config(interim_dir="", **kwargs))
+
+
+def test_a_lock_is_flagged_among_ordinary_harbours():
+    """Kiel-Holtenau: 37 min, one visit per vessel, all of it commercial."""
+    lock = _site(99, dwell=37.0, visits=1.0, repeat=1, cargo=21)
+    result = _flag([*_harbours(), lock])
+
+    assert bool(result.iloc[-1]["transit_like"]) is True
+    assert not result.iloc[:-1]["transit_like"].any()
+
+
+def test_a_recreational_site_with_the_same_timing_is_not_flagged():
+    """
+    Cuxhaven, confirmed a real harbour. Its dwell and visit pattern look like
+    the lock's; the traffic does not. This clause is what carries the precision.
+    """
+    marina = _site(99, dwell=37.0, visits=1.0, repeat=1, recreational=21)
+    result = _flag([*_harbours(), marina])
+
+    assert bool(result.iloc[-1]["transit_like"]) is False
+
+
+def test_the_flag_survives_a_longer_observation_window():
+    """
+    The reason the visit thresholds are ratios. Ten times the AIS gives every
+    site ten times the visits — a fixed cutoff would stop matching the lock,
+    while the median moves with it.
+    """
+    def run(scale: int) -> bool:
+        harbours = [_site(i, dwell=400.0, visits=3.0 * scale, repeat=8 * scale,
+                          recreational=30) for i in range(25)]
+        lock = _site(99, dwell=37.0, visits=1.0 * scale, repeat=1 * scale,
+                     cargo=21)
+        return bool(_flag([*harbours, lock]).iloc[-1]["transit_like"])
+
+    assert run(1) is True
+    assert run(10) is True
+
+
+def test_a_busy_harbour_is_never_flagged():
+    result = _flag([*_harbours(), _site(99, dwell=600.0, visits=8.0, repeat=30,
+                                        cargo=50)])
+    assert bool(result.iloc[-1]["transit_like"]) is False
+
+
+def test_a_site_with_no_vessel_types_is_left_alone():
+    """No ship_type at all must mean 'cannot judge', not 'flag it'."""
+    unknown = _site(99, dwell=37.0, visits=1.0, repeat=1)   # every count zero
+    result = _flag([*_harbours(), unknown])
+
+    assert bool(result.iloc[-1]["transit_like"]) is False
+
+
+def test_detection_is_skipped_when_there_are_too_few_harbours():
+    """A median over a handful of sites is noise, not a baseline."""
+    rows = [*_harbours(3), _site(99, dwell=37.0, visits=1.0, repeat=1, cargo=21)]
+    assert not _flag(rows)["transit_like"].any()
+
+
+def test_transit_detection_can_be_switched_off():
+    lock = _site(99, dwell=37.0, visits=1.0, repeat=1, cargo=21)
+    result = _flag([*_harbours(), lock], transit_max_dwell_minutes=0.0)
+
+    assert not result["transit_like"].any()

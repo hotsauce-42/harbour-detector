@@ -26,6 +26,7 @@ import reverse_geocoder as rg
 from shapely.geometry import shape
 from shapely.wkt import dumps as to_wkt
 
+from pipeline.h3_aggregation import VESSEL_COUNTS
 from utils.gazetteer import Gazetteer, bbox_around
 from utils.geo import haversine_meters, outline_polygon
 from utils.s3 import (
@@ -45,9 +46,20 @@ ENRICHED_SCHEMA = pa.schema([
     pa.field("n_events", pa.int32()),
     pa.field("n_unique_mmsi", pa.int32()),
     pa.field("n_draught_changes", pa.int32()),
+    pa.field("mean_dwell_minutes", pa.float64()),
+    pa.field("max_visits_per_mmsi", pa.int32()),
+    pa.field("n_cargo", pa.int32()),
+    pa.field("n_tanker", pa.int32()),
+    pa.field("n_passenger", pa.int32()),
+    pa.field("n_fishing", pa.int32()),
+    pa.field("n_recreational", pa.int32()),
+    pa.field("n_tug_pilot", pa.int32()),
+    # Does this site behave like somewhere vessels pass through rather than
+    # stay? See _flag_transit_sites.
+    pa.field("transit_like", pa.bool_()),
     pa.field("centroid_lat", pa.float64()),
     pa.field("centroid_lon", pa.float64()),
-    pa.field("centroid_h3_r8", pa.string()),
+    pa.field("centroid_id_cell", pa.string()),
     pa.field("bbox_min_lat", pa.float64()),
     pa.field("bbox_max_lat", pa.float64()),
     pa.field("bbox_min_lon", pa.float64()),
@@ -93,6 +105,16 @@ class Phase4Config:
     port_city_max_km: float = 8.0
     port_city_min_population: int = 50_000
     port_city_max_hamlet_population: int = 0
+    # Transit detection — see _flag_transit_sites. Dwell is an absolute limit
+    # because a lock cycle is bounded by physics; the visit thresholds are
+    # ratios against this run's median because raw visit counts grow with the
+    # length of the AIS window. 0 minutes disables the whole step.
+    transit_max_dwell_minutes: float = 120.0
+    transit_max_visits_ratio: float = 0.85
+    transit_max_repeat_ratio: float = 0.55
+    transit_min_commercial_share: float = 0.4
+    transit_min_classified_vessels: int = 3
+    transit_min_sample: int = 20
     # Outline generation — see utils.geo.outline_polygon
     outline_buffer_meters: float = 75.0
     outline_simplify_meters: float = 0.0
@@ -115,6 +137,18 @@ class Phase4Config:
             port_city_max_hamlet_population=int(
                 p4.get("port_city_max_hamlet_population", 0)
             ),
+            transit_max_dwell_minutes=float(
+                p4.get("transit_max_dwell_minutes", 120.0)
+            ),
+            transit_max_visits_ratio=float(p4.get("transit_max_visits_ratio", 0.85)),
+            transit_max_repeat_ratio=float(p4.get("transit_max_repeat_ratio", 0.55)),
+            transit_min_commercial_share=float(
+                p4.get("transit_min_commercial_share", 0.4)
+            ),
+            transit_min_classified_vessels=int(
+                p4.get("transit_min_classified_vessels", 3)
+            ),
+            transit_min_sample=int(p4.get("transit_min_sample", 20)),
             outline_buffer_meters=p4.get("outline_buffer_meters", 75.0),
             outline_simplify_meters=p4.get("outline_simplify_meters", 0.0),
             outline_fill_holes=p4.get("outline_fill_holes", True),
@@ -353,41 +387,102 @@ def _add_geocoding(clusters: pd.DataFrame, config: Phase4Config) -> pd.DataFrame
 
 
 # ---------------------------------------------------------------------------
+# Step 3b: transit sites (ship locks) masquerading as harbours
+# ---------------------------------------------------------------------------
+
+# A lock on a shipping canal is transited by commercial traffic. The share of
+# cargo and tankers is what separates it from a marina with the same dwell:
+# Kiel-Holtenau is 1.00 and Brunsbüttel 0.50, while the two Cuxhaven harbours
+# that otherwise looked identical are 0.00 and 0.29.
+COMMERCIAL_COUNTS = ("n_cargo", "n_tanker")
+
+
+def _flag_transit_sites(clusters: pd.DataFrame, config: Phase4Config) -> pd.DataFrame:
+    """
+    Mark sites where vessels pass through rather than stay — ship locks.
+
+    A lock produces exactly the signature Phases 1-3 look for, so it cannot be
+    excluded earlier. What gives it away is the shape of its traffic:
+
+      * dwell is short and bounded by physics — a lock cycle, piling up just
+        above phase1.min_stop_duration_minutes rather than spread over hours
+      * each vessel appears about once: it is passing, not berthing
+      * the traffic is commercial, which is what distinguishes a canal lock
+        from a marina where boats also stop briefly
+
+    The dwell limit is absolute; the two visit limits are **ratios against this
+    run's median**, because raw visit counts grow with the length of the AIS
+    window — a threshold tuned on one day would quietly stop matching anything
+    on a month. The medians make the test self-calibrating.
+
+    Advisory only. Nothing is dropped, and Phase 5 lets an operator overrule
+    the verdict either way.
+    """
+    clusters = clusters.copy()
+    clusters["transit_like"] = False
+    if config.transit_max_dwell_minutes <= 0:
+        return clusters
+
+    if len(clusters) < config.transit_min_sample:
+        logger.info(
+            "  transit detection skipped: %d harbours is too few for the "
+            "median to mean anything (need %d)",
+            len(clusters), config.transit_min_sample,
+        )
+        return clusters
+
+    visits = clusters["n_events"] / clusters["n_unique_mmsi"].clip(lower=1)
+    repeat = clusters["max_visits_per_mmsi"]
+    classified = sum(clusters[c] for c in VESSEL_COUNTS)
+    commercial = sum(clusters[c] for c in COMMERCIAL_COUNTS)
+    share = commercial / classified.where(classified > 0)
+
+    flag = (
+        (clusters["mean_dwell_minutes"] < config.transit_max_dwell_minutes)
+        & (visits < visits.median() * config.transit_max_visits_ratio)
+        & (repeat <= repeat.median() * config.transit_max_repeat_ratio)
+        & (classified >= config.transit_min_classified_vessels)
+        & (share >= config.transit_min_commercial_share)
+    )
+    clusters["transit_like"] = flag.fillna(False)
+
+    n_unknown = int((classified < config.transit_min_classified_vessels).sum())
+    if n_unknown:
+        logger.info(
+            "  %d harbour(s) have too few vessels of known type to judge — "
+            "left unflagged (ship_type comes from phase1's type-5 join)",
+            n_unknown,
+        )
+    n_flagged = int(clusters["transit_like"].sum())
+    if n_flagged:
+        logger.info(
+            "  %d site(s) look like transit points rather than harbours "
+            "(dwell < %.0f min, few repeat visits, commercial traffic)",
+            n_flagged, config.transit_max_dwell_minutes,
+        )
+    return clusters
+
+
+# ---------------------------------------------------------------------------
 # Step 4: write output
 # ---------------------------------------------------------------------------
 
 def _write_enriched(df: pd.DataFrame, config: Phase4Config) -> str:
     out_path = path_join(config.interim_dir, "harbours_enriched.parquet")
 
-    h3_cells_array = pa.array(df["h3_cells"].tolist(), type=pa.list_(pa.string()))
-    dist_km_array = pa.array(
-        df["nearest_city_dist_km"].astype("float32"), type=pa.float32()
-    )
-
+    # Built from ENRICHED_SCHEMA, so a field added to the schema cannot be
+    # silently left out of the writer. Two columns need help: h3_cells is a
+    # list, and nearest_city_dist_km is float32 where pandas holds float64.
     table = pa.table(
         {
-            "cluster_id": pa.array(df["cluster_id"], type=pa.int32()),
-            "h3_cells": h3_cells_array,
-            "n_cells": pa.array(df["n_cells"], type=pa.int32()),
-            "n_events": pa.array(df["n_events"], type=pa.int32()),
-            "n_unique_mmsi": pa.array(df["n_unique_mmsi"], type=pa.int32()),
-            "n_draught_changes": pa.array(df["n_draught_changes"], type=pa.int32()),
-            "centroid_lat": pa.array(df["centroid_lat"], type=pa.float64()),
-            "centroid_lon": pa.array(df["centroid_lon"], type=pa.float64()),
-            "centroid_h3_r8": pa.array(df["centroid_h3_r8"], type=pa.string()),
-            "bbox_min_lat": pa.array(df["bbox_min_lat"], type=pa.float64()),
-            "bbox_max_lat": pa.array(df["bbox_max_lat"], type=pa.float64()),
-            "bbox_min_lon": pa.array(df["bbox_min_lon"], type=pa.float64()),
-            "bbox_max_lon": pa.array(df["bbox_max_lon"], type=pa.float64()),
-            "geometry_wkt": pa.array(df["geometry_wkt"], type=pa.string()),
-            "outline_wkt": pa.array(df["outline_wkt"], type=pa.string()),
-            "country_iso2": pa.array(df["country_iso2"], type=pa.string()),
-            "country_name": pa.array(df["country_name"], type=pa.string()),
-            "nearest_city": pa.array(df["nearest_city"], type=pa.string()),
-            "nearest_city_lat": pa.array(df["nearest_city_lat"], type=pa.float64()),
-            "nearest_city_lon": pa.array(df["nearest_city_lon"], type=pa.float64()),
-            "nearest_city_dist_km": dist_km_array,
-            "admin1": pa.array(df["admin1"], type=pa.string()),
+            field.name: (
+                pa.array(df["h3_cells"].tolist(), type=field.type)
+                if field.name == "h3_cells"
+                else pa.array(df[field.name].astype("float32"), type=field.type)
+                if field.name == "nearest_city_dist_km"
+                else pa.array(df[field.name], type=field.type)
+            )
+            for field in ENRICHED_SCHEMA
         },
         schema=ENRICHED_SCHEMA,
     )
@@ -423,4 +518,5 @@ def run_phase4(config: Phase4Config) -> str:
 
     clusters = _add_polygons(clusters, config)
     clusters = _add_geocoding(clusters, config)
+    clusters = _flag_transit_sites(clusters, config)
     return _write_enriched(clusters, config)

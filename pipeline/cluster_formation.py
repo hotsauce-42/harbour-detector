@@ -33,6 +33,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from pipeline.h3_aggregation import VESSEL_COUNTS
 from utils.s3 import (
     build_s3_config,
     get_s3_filesystem,
@@ -53,11 +54,21 @@ CLUSTER_SCHEMA = pa.schema([
     # vessels spanning cells) only when stops.parquet is unavailable.
     pa.field("n_unique_mmsi",        pa.int32()),
     pa.field("n_draught_changes",    pa.int32()),
+    # Behavioural signature, carried up from h3_counts so Phase 4 can tell a
+    # harbour from a place vessels merely pass through (see VESSEL_COUNTS).
+    pa.field("mean_dwell_minutes",   pa.float64()),
+    pa.field("max_visits_per_mmsi",  pa.int32()),
+    pa.field("n_cargo",              pa.int32()),
+    pa.field("n_tanker",             pa.int32()),
+    pa.field("n_passenger",          pa.int32()),
+    pa.field("n_fishing",            pa.int32()),
+    pa.field("n_recreational",       pa.int32()),
+    pa.field("n_tug_pilot",          pa.int32()),
     pa.field("centroid_lat",         pa.float64()),
     pa.field("centroid_lon",         pa.float64()),
     # H3 cell at resolution 8 of the centroid — used for deterministic ID
     # generation in Phase 5.
-    pa.field("centroid_h3_r8",       pa.string()),
+    pa.field("centroid_id_cell",       pa.string()),
     pa.field("bbox_min_lat",         pa.float64()),
     pa.field("bbox_max_lat",         pa.float64()),
     pa.field("bbox_min_lon",         pa.float64()),
@@ -77,6 +88,13 @@ class Phase3Config:
     detached_ring_size: int = 2           # rings that still count as "attached"
     max_detached_cells: int = 2           # a bigger detached group is a real berth
     max_detached_event_share: float = 0.05  # …and so is a busier one
+    # Resolution of the cell the harbour_id is hashed from. Two harbours whose
+    # centroids share this cell get the SAME id however well Phase 5 matches,
+    # so it has to be finer than the closest harbours get: a cell's span is
+    # 2x its edge, 1063 m at res 8 and 402 m at res 9. Changing it re-ids every
+    # harbour that does not match an existing database — see
+    # scripts/carry_manual_edits.py.
+    centroid_id_resolution: int = 9
     s3_cfg: dict = field(default_factory=dict)
 
     @classmethod
@@ -95,6 +113,7 @@ class Phase3Config:
             detached_ring_size=p3.get("detached_ring_size", 2),
             max_detached_cells=p3.get("max_detached_cells", 2),
             max_detached_event_share=p3.get("max_detached_event_share", 0.05),
+            centroid_id_resolution=int(p3.get("centroid_id_resolution", 9)),
             s3_cfg=build_s3_config(cfg.get("s3", {})),
         )
 
@@ -209,7 +228,7 @@ def _prune_detached_cells(
     traffic share alone would eat whole outlying terminals.
 
     Whatever survives is what `_cluster_stats` then measures — counts, the
-    event-weighted centroid, `centroid_h3_r8` and the bbox all come out of these
+    event-weighted centroid, `centroid_id_cell` and the bbox all come out of these
     lists — and `_filter_clusters` re-applies the cluster minimums afterwards,
     so a cluster pruned below them is still dropped.
     """
@@ -330,6 +349,7 @@ def _cluster_stats(
     components: list[list[str]],
     cell_df: pd.DataFrame,
     cell_mmsi: Optional[dict[str, set]] = None,
+    centroid_id_resolution: int = 9,
 ) -> list[dict]:
     """
     For each component, aggregate the per-cell counts from h3_counts and
@@ -355,6 +375,10 @@ def _cluster_stats(
         else:
             n_unique = int(sub["n_unique_mmsi"].sum())
 
+        # Event-weighted, like the centroid: a cell that saw one stop should
+        # not pull the harbour's dwell as hard as one that saw fifty.
+        dwell = float((sub["mean_duration_minutes"] * weights).sum() / total_weight)
+
         records.append({
             "cluster_id":           cluster_id,
             "h3_cells":             sorted(cells),
@@ -362,9 +386,13 @@ def _cluster_stats(
             "n_events":             n_events,
             "n_unique_mmsi":        n_unique,
             "n_draught_changes":    int(sub["n_draught_changes"].sum()),
+            "mean_dwell_minutes":   dwell,
+            "max_visits_per_mmsi":  int(sub["max_visits_per_mmsi"].max()),
+            **{c: int(sub[c].sum()) for c in VESSEL_COUNTS},
             "centroid_lat":         centroid_lat,
             "centroid_lon":         centroid_lon,
-            "centroid_h3_r8":       h3.latlng_to_cell(centroid_lat, centroid_lon, 8),
+            "centroid_id_cell":     h3.latlng_to_cell(centroid_lat, centroid_lon,
+                                                      centroid_id_resolution),
             "bbox_min_lat":         float(sub["cell_lat"].min()),
             "bbox_max_lat":         float(sub["cell_lat"].max()),
             "bbox_min_lon":         float(sub["cell_lon"].min()),
@@ -402,23 +430,17 @@ def _filter_clusters(df: pd.DataFrame, config: Phase3Config) -> pd.DataFrame:
 def _write_clusters(df: pd.DataFrame, config: Phase3Config) -> str:
     out_path = path_join(config.interim_dir, "harbour_clusters.parquet")
 
-    # PyArrow requires explicit list type for the h3_cells column
-    h3_cells_array = pa.array(df["h3_cells"].tolist(), type=pa.list_(pa.string()))
+    # Built from CLUSTER_SCHEMA rather than a hand-written column list, so
+    # adding a field to the schema cannot silently skip the writer. h3_cells is
+    # the one column pyarrow needs told about its element type.
     table = pa.table(
         {
-            "cluster_id":        pa.array(df["cluster_id"],        type=pa.int32()),
-            "h3_cells":          h3_cells_array,
-            "n_cells":           pa.array(df["n_cells"],           type=pa.int32()),
-            "n_events":          pa.array(df["n_events"],          type=pa.int32()),
-            "n_unique_mmsi":     pa.array(df["n_unique_mmsi"],     type=pa.int32()),
-            "n_draught_changes": pa.array(df["n_draught_changes"], type=pa.int32()),
-            "centroid_lat":      pa.array(df["centroid_lat"],      type=pa.float64()),
-            "centroid_lon":      pa.array(df["centroid_lon"],      type=pa.float64()),
-            "centroid_h3_r8":    pa.array(df["centroid_h3_r8"],    type=pa.string()),
-            "bbox_min_lat":      pa.array(df["bbox_min_lat"],      type=pa.float64()),
-            "bbox_max_lat":      pa.array(df["bbox_max_lat"],      type=pa.float64()),
-            "bbox_min_lon":      pa.array(df["bbox_min_lon"],      type=pa.float64()),
-            "bbox_max_lon":      pa.array(df["bbox_max_lon"],      type=pa.float64()),
+            field.name: (
+                pa.array(df["h3_cells"].tolist(), type=field.type)
+                if field.name == "h3_cells"
+                else pa.array(df[field.name], type=field.type)
+            )
+            for field in CLUSTER_SCHEMA
         },
         schema=CLUSTER_SCHEMA,
     )
@@ -475,7 +497,14 @@ def run_phase3(config: Phase3Config) -> str:
     cell_mmsi = _load_cell_mmsi_map(config, hot_cells)
 
     logger.info("Computing cluster statistics …")
-    records = _cluster_stats(components, cell_df, cell_mmsi)
+    cell_res = h3.get_resolution(next(iter(hot_cells)))
+    if config.centroid_id_resolution >= cell_res:
+        raise ValueError(
+            f"centroid_id_resolution ({config.centroid_id_resolution}) must be "
+            f"coarser than the cell resolution ({cell_res})"
+        )
+    records = _cluster_stats(components, cell_df, cell_mmsi,
+                             config.centroid_id_resolution)
     df = pd.DataFrame(records)
 
     df = _filter_clusters(df, config)

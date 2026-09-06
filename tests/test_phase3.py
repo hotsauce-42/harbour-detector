@@ -18,7 +18,7 @@ from pipeline.cluster_formation import (
     _prune_detached_cells,
     run_phase3,
 )
-from pipeline.h3_aggregation import H3_COUNTS_SCHEMA
+from pipeline.h3_aggregation import H3_COUNTS_SCHEMA, VESSEL_COUNTS
 from utils.geo import haversine_meters
 
 RES = 11
@@ -32,25 +32,36 @@ def _neighbours(cell: str, n: int = 1) -> list[str]:
 
 
 def _make_counts(cells: list[str], n_unique_mmsi: int = 10,
-                 n_events: int | dict[str, int] = 20) -> pd.DataFrame:
+                 n_events: int | dict[str, int] = 20,
+                 mean_duration_minutes: float | dict[str, float] = 60.0,
+                 max_visits_per_mmsi: int = 3,
+                 **vessel_counts: int) -> pd.DataFrame:
     """
-    A minimal h3_counts frame. `n_events` may be a per-cell mapping, which is
-    what the pruning tests need — an outlier is defined by carrying less
-    traffic than the body, so a single constant cannot express one.
+    A minimal h3_counts frame. `n_events` and `mean_duration_minutes` may be
+    per-cell mappings: an outlier is defined by carrying less traffic than the
+    body, and a lock by dwelling less, so a single constant cannot express one.
+    Vessel-type counts default to 0 and are passed by name, e.g. n_cargo=5.
     """
+    def per_cell(value):
+        return value if isinstance(value, dict) else dict.fromkeys(cells, value)
+
     latlons = [h3.cell_to_latlng(c) for c in cells]
-    events = (n_events if isinstance(n_events, dict)
-              else dict.fromkeys(cells, n_events))
-    return pd.DataFrame({
+    events = per_cell(n_events)
+    dwell = per_cell(mean_duration_minutes)
+    frame = pd.DataFrame({
         "h3_cell":                cells,
         "n_unique_mmsi":          [n_unique_mmsi] * len(cells),
         "n_events":               [events[c] for c in cells],
         "total_duration_minutes": [120.0]         * len(cells),
-        "mean_duration_minutes":  [60.0]          * len(cells),
+        "mean_duration_minutes":  [dwell[c] for c in cells],
         "cell_lat":               [ll[0] for ll in latlons],
         "cell_lon":               [ll[1] for ll in latlons],
         "n_draught_changes":      [2]             * len(cells),
+        "max_visits_per_mmsi":    [max_visits_per_mmsi] * len(cells),
     })
+    for column in VESSEL_COUNTS:
+        frame[column] = vessel_counts.get(column, 0)
+    return frame
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +237,7 @@ def test_pruning_can_be_switched_off():
 def test_pruning_pulls_the_centroid_back_onto_the_body():
     """
     What the prune is ultimately for. The stray cell drags the event-weighted
-    centroid out towards itself, and the centroid is what `centroid_h3_r8` —
+    centroid out towards itself, and the centroid is what `centroid_id_cell` —
     and so the harbour id — is derived from.
     """
     cells = [*_body(), STRAY_CELL]
@@ -252,16 +263,8 @@ def test_pruning_pulls_the_centroid_back_onto_the_body():
 def test_cluster_stats_centroid_weighted():
     cell_a = SEED_CELL
     cell_b = _neighbours(SEED_CELL)[0]
-    cell_df = pd.DataFrame({
-        "h3_cell":            [cell_a, cell_b],
-        "n_events":           [100, 10],          # cell_a gets 10× more weight
-        "n_unique_mmsi":      [50, 5],
-        "n_draught_changes":  [3, 1],
-        "cell_lat":           [h3.cell_to_latlng(cell_a)[0],
-                               h3.cell_to_latlng(cell_b)[0]],
-        "cell_lon":           [h3.cell_to_latlng(cell_a)[1],
-                               h3.cell_to_latlng(cell_b)[1]],
-    })
+    cell_df = _make_counts([cell_a, cell_b],
+                           n_events={cell_a: 100, cell_b: 10})  # 10x the weight
     records = _cluster_stats([[cell_a, cell_b]], cell_df)
     r = records[0]
 
@@ -310,7 +313,7 @@ def test_filter_removes_low_vessel_clusters():
         {"cluster_id": 0, "h3_cells": [cell_a], "n_cells": 1, "n_events": 100,
          "n_unique_mmsi": 2, "n_draught_changes": 0,
          "centroid_lat": 53.54, "centroid_lon": 9.97,
-         "centroid_h3_r8": h3.latlng_to_cell(53.54, 9.97, 8),
+         "centroid_id_cell": h3.latlng_to_cell(53.54, 9.97, 8),
          "bbox_min_lat": 53.54, "bbox_max_lat": 53.54,
          "bbox_min_lon": 9.97,  "bbox_max_lon": 9.97},
     ])
@@ -331,13 +334,13 @@ def test_filter_removes_small_clusters():
         {"cluster_id": 0, "h3_cells": [cell_a], "n_cells": 1, "n_events": 100,
          "n_unique_mmsi": 50, "n_draught_changes": 2,
          "centroid_lat": 53.54, "centroid_lon": 9.97,
-         "centroid_h3_r8": h3.latlng_to_cell(53.54, 9.97, 8),
+         "centroid_id_cell": h3.latlng_to_cell(53.54, 9.97, 8),
          "bbox_min_lat": 53.54, "bbox_max_lat": 53.54,
          "bbox_min_lon": 9.97,  "bbox_max_lon": 9.97},
         {"cluster_id": 1, "h3_cells": [cell_b], "n_cells": 1, "n_events": 2,
          "n_unique_mmsi": 1, "n_draught_changes": 0,
          "centroid_lat": 51.90, "centroid_lon": 4.47,
-         "centroid_h3_r8": h3.latlng_to_cell(51.90, 4.47, 8),
+         "centroid_id_cell": h3.latlng_to_cell(51.90, 4.47, 8),
          "bbox_min_lat": 51.90, "bbox_max_lat": 51.90,
          "bbox_min_lon": 4.47,  "bbox_max_lon": 4.47},
     ])
@@ -355,7 +358,7 @@ def test_filter_resets_cluster_ids():
         {"cluster_id": 99, "h3_cells": [cell_a], "n_cells": 1, "n_events": 50,
          "n_unique_mmsi": 10, "n_draught_changes": 0,
          "centroid_lat": 53.54, "centroid_lon": 9.97,
-         "centroid_h3_r8": h3.latlng_to_cell(53.54, 9.97, 8),
+         "centroid_id_cell": h3.latlng_to_cell(53.54, 9.97, 8),
          "bbox_min_lat": 53.54, "bbox_max_lat": 53.54,
          "bbox_min_lon": 9.97,  "bbox_max_lon": 9.97},
     ])
@@ -461,3 +464,101 @@ def test_run_phase3_small_harbour_survives_with_exact_counts(tmp_path):
     assert result.iloc[0]["n_cells"] == 5
     # exactly 5 distinct vessels — not 10 (the per-cell sum)
     assert result.iloc[0]["n_unique_mmsi"] == 5
+
+
+# ---------------------------------------------------------------------------
+# The behavioural signature carried up for Phase 4
+# ---------------------------------------------------------------------------
+
+def test_dwell_is_event_weighted_like_the_centroid():
+    """
+    A cell that saw one stop must not pull the harbour's dwell as hard as one
+    that saw fifty — the same reasoning as the weighted centroid beside it.
+    """
+    busy, quiet = SEED_CELL, _neighbours(SEED_CELL)[0]
+    counts = _make_counts([busy, quiet],
+                          n_events={busy: 90, quiet: 10},
+                          mean_duration_minutes={busy: 40.0, quiet: 400.0})
+
+    stats = _cluster_stats([[busy, quiet]], counts)[0]
+
+    assert stats["mean_dwell_minutes"] == pytest.approx(76.0)   # not 220
+
+
+def test_repeat_visits_and_vessel_mix_reach_the_cluster():
+    """Phase 4 cannot tell a lock from a marina without these."""
+    cells = [SEED_CELL, _neighbours(SEED_CELL)[0]]
+    counts = _make_counts(cells, max_visits_per_mmsi=1, n_cargo=7, n_tanker=3)
+
+    stats = _cluster_stats([cells], counts)[0]
+
+    assert stats["max_visits_per_mmsi"] == 1
+    assert stats["n_cargo"] == 14        # summed over both cells
+    assert stats["n_tanker"] == 6
+    assert stats["n_recreational"] == 0
+
+
+# ---------------------------------------------------------------------------
+# The resolution the harbour_id is hashed from
+# ---------------------------------------------------------------------------
+
+# The two Hvide Sande basins, 465 m apart — the real pair that collided at
+# res 8. A cell spans 2x its edge: 1063 m at res 8, 402 m at res 9.
+HVIDE_SANDE_A = (56.00447, 8.12236)
+HVIDE_SANDE_B = (56.00090, 8.12627)
+
+
+def test_two_close_harbours_share_an_id_cell_at_res8_but_not_at_res9():
+    """
+    The collision this resolution exists to remove. Nothing about matching can
+    fix it: the id is hashed from this cell, so two harbours inside one cell
+    are the same id by construction.
+    """
+    at8 = {h3.latlng_to_cell(lat, lon, 8) for lat, lon in
+           (HVIDE_SANDE_A, HVIDE_SANDE_B)}
+    at9 = {h3.latlng_to_cell(lat, lon, 9) for lat, lon in
+           (HVIDE_SANDE_A, HVIDE_SANDE_B)}
+
+    assert len(at8) == 1          # one cell -> one id -> a duplicate
+    assert len(at9) == 2
+
+
+def test_the_id_cell_follows_the_configured_resolution():
+    cells = [SEED_CELL, _neighbours(SEED_CELL)[0]]
+    counts = _make_counts(cells)
+
+    for res in (8, 9, 10):
+        stats = _cluster_stats([cells], counts, centroid_id_resolution=res)[0]
+        assert h3.get_resolution(stats["centroid_id_cell"]) == res
+
+
+def test_the_default_id_resolution_is_9():
+    """Coarsest collision-free choice for the reference data; see settings.yaml."""
+    assert Phase3Config(interim_dir="").centroid_id_resolution == 9
+    assert Phase3Config.from_yaml({}).centroid_id_resolution == 9
+    assert Phase3Config.from_yaml(
+        {"phase3": {"centroid_id_resolution": 10}}
+    ).centroid_id_resolution == 10
+
+
+def test_an_id_cell_finer_than_the_data_cells_is_rejected(tmp_path):
+    """A res-12 id cell inside res-11 data would be finer than the evidence."""
+    counts = _make_counts([SEED_CELL])
+    counts_path = tmp_path / "h3_counts.parquet"
+    pa_table = pa.Table.from_pandas(
+        _full_counts_frame(counts), schema=H3_COUNTS_SCHEMA, safe=False,
+    )
+    pq.write_table(pa_table, counts_path)
+
+    config = Phase3Config(interim_dir=str(tmp_path), centroid_id_resolution=12)
+    with pytest.raises(ValueError, match="coarser"):
+        run_phase3(config)
+
+
+def _full_counts_frame(df):
+    """Pad a minimal counts frame out to H3_COUNTS_SCHEMA."""
+    frame = df.copy()
+    for field in H3_COUNTS_SCHEMA:
+        if field.name not in frame.columns:
+            frame[field.name] = None
+    return frame[[f.name for f in H3_COUNTS_SCHEMA]]

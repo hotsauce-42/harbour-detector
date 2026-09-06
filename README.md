@@ -139,6 +139,12 @@ On a 331-harbour Danish run this removes 45 of 2 413 cells across 29 harbours, t
 | `port_city_max_km` | `8` | A port belongs to its city: radius to search for an administrative seat when the nearest place is an unpopulated hamlet. `0` disables the rule |
 | `port_city_min_population` | `50000` | How large that seat must be |
 | `port_city_max_hamlet_population` | `0` | The trigger — a place with more recorded inhabitants than this keeps its own name |
+| `transit_max_dwell_minutes` | `120` | Flag sites where vessels pass through rather than stay — ship locks. `0` disables |
+| `transit_max_visits_ratio` | `0.85` | Visits per vessel, as a fraction of the run's median (relative, so it survives a longer AIS window) |
+| `transit_max_repeat_ratio` | `0.55` | Max repeat visits by one vessel, likewise relative |
+| `transit_min_commercial_share` | `0.4` | Cargo+tanker share required — what separates a canal lock from a marina |
+| `transit_min_classified_vessels` | `3` | Vessels of known type needed before judging at all |
+| `transit_min_sample` | `20` | Below this many harbours a median is meaningless and nothing is flagged |
 | `outline_buffer_meters` | `75` | Closing radius for the harbour outline. Fills gaps narrower than 2× this (~150 m, three res-11 cells) without pushing the boundary more than ~1 buffer past the outermost cell. Raise it to merge terminals that are further apart into a single polygon. |
 | `outline_simplify_meters` | `0` | Vertex thinning tolerance for the outline. Off by default — it is the only step that can pull the boundary inside a trafficked cell (a 10 m tolerance already bites up to ~50 m, a whole res-11 cell). Raise it to shrink the output ~5× if that trade is acceptable. |
 | `outline_fill_holes` | `true` | Drop interior rings, so untrafficked cells inside a harbour leave no holes |
@@ -178,6 +184,16 @@ Two things this deliberately does **not** change:
 
   Note that `harbour_id` is `{country_iso2}-{hash}`, so the country is *inside* the ID: a harbour whose country changes and which Phase 5 does *not* match against your existing database will be issued a new ID. On the reference run this affected 1 harbour of 328 and 0 IDs — a harbour in the Swedish Koster archipelago that `reverse_geocoder` had placed in Norway, from a town 14.8 km away rather than the village 1.0 km away. Re-measure on your own data before assuming the same.
 - **A district is not a city — unless it is a town in its own right.** GeoNames records city districts as their own entries (`PPLX`) at the district rather than the town centre, which for a waterfront district is nearer the harbour. Left alone they name a harbour `Altstadt` or `Holmen` instead of Heiligenhafen or Copenhagen. A district is kept only if GeoNames counts people in it *and* no more populous place sits within 5 km — the stand-in for the parent-city link the dump does not carry. Warnemünde's nearest bigger place is Rostock, 12 km off, so a harbour there is still called Warnemünde; Christiania's is Copenhagen, 2 km off, so those harbours are called Copenhagen. Abandoned and destroyed places are dropped outright.
+#### Not every cluster of stops is a harbour
+
+A ship lock behaves like a quay — vessels stop, then move on — so Phases 1-3 cannot exclude it. Phase 4 flags it from the shape of its traffic instead: a short dwell bounded by the lock cycle, roughly one visit per vessel, and commercial traffic. The Kiel-Holtenau lock dwells 37 minutes against a median of 393.
+
+The dwell limit is absolute, but the two visit limits are **ratios against the run's own median**, because raw visit counts grow with the length of the AIS window — a fixed threshold tuned on one day quietly stops matching on a month. The commercial-share clause is what buys the precision: it separates the two Kiel Canal locks (1.00 and 0.50) from harbours with an identical dwell profile (0.00 and 0.29).
+
+It is **advisory** — nothing is dropped — and it detects *locks* specifically, not non-harbours in general. It was fitted against two confirmed locks and two confirmed harbours, so treat a flag as a prompt to look, not a verdict.
+
+In the GUI a flagged site shows a warning banner and an amber outline, the **Show all N flagged as locks** toggle draws every one of them on the map, the table gains a sortable `Lock?` column, and the **Site type** panel lets you overrule the detector in either direction. That choice is three-state: *Auto* follows the detector and keeps updating, while *Lock* and *Not a lock* are your decision and survive every future run — stored as `manual_transit_like` and re-applied by Phase 5.
+
 - **A port is named after its city.** The nearest place to a quay is often an unrelated hamlet GeoNames records no inhabitants for — Rostock's Überseehafen is 0.6 km from Petersdorf and 7.5 km from Rostock. When the chosen place has no recorded population, an administrative seat of at least `port_city_min_population` in the *same country* within `port_city_max_km` takes over. A place with a population of its own is never overridden, so Warnemünde keeps its name.
 - **…but only if the harbour is really in that city.** The override is checked against GeoNames administrative division codes: Hellerup is 4.6 km from Copenhagen but in Gentofte kommune, so its harbour stays Hellerup. On the reference run this confirmed 22 of 28 overrides and rejected 6. A gazetteer built before these columns existed still loads — the check simply stands down.
 - **Large harbours keep their city.** With every village in the gazetteer, the nearest place to a major port is often a hamlet on its edge. `city_population_tiers` raises the population floor as `n_cells` grows, so a port gets its city and a marina gets its village. Administrative seats are exempt from the floor, since GeoNames often records a small population for a county town.
@@ -832,6 +848,9 @@ kubectl delete job harbour-detector -n ais   # clean up
 ---
 
 ## Output format
+
+> **Feeding a run back in as the existing database.** Any of the three output files works, but prefer `harbours.geojson` (or `harbours.parquet`) — both now carry `h3_cells`, which is what lets Phase 5 match on H3 overlap rather than centroid distance alone. A database written before this was fixed has an empty `h3_cells` on every record; re-copy a fresh output over it to switch H3 matching back on.
+
 
 Phase 5 writes three files, all covering the same harbours with the same properties:
 

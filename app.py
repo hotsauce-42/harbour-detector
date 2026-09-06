@@ -33,11 +33,14 @@ from streamlit_folium import st_folium
 from utils.geo import clean_polygon, merge_outlines
 from utils.map_assets import VENDOR_URL, is_vendored, use_local_assets
 from utils.overrides import (
+    DETECTED_TRANSIT_KEY,
+    MANUAL_TRANSIT_KEY,
     DETECTED_OUTLINE_KEY,
     EDITABLE_FIELDS,
     MANUAL_OUTLINE_KEY,
     OVERRIDES_KEY,
     manual_outline,
+    manual_transit,
     normalise_overrides,
     resolve_country_iso2,
 )
@@ -235,6 +238,47 @@ def save_harbour_edits(
             props.pop(OVERRIDES_KEY, None)
 
     return [p for p in paths if _edit_harbour_in_file(p, harbour_id, mutate)]
+
+
+def save_harbour_transit(
+    paths: list[str],
+    harbour_id: str,
+    verdict: bool | None,
+) -> list[str]:
+    """
+    Persist an operator's lock verdict for one harbour into every GeoJSON.
+
+    Tri-state, and the third state is what the property's *absence* means:
+    `verdict=None` removes it, which is "no opinion — use whatever the pipeline
+    detected", and is different from storing False ("looked at it; not a lock").
+    Phase 5 reads the stored value back and lets it replace its own verdict.
+    """
+    def mutate(feat: dict) -> None:
+        props = feat["properties"]
+        if verdict is None:
+            props.pop(MANUAL_TRANSIT_KEY, None)
+        else:
+            props[MANUAL_TRANSIT_KEY] = bool(verdict)
+        # Keep the effective flag in step so the map and table react at once,
+        # without waiting for the next pipeline run.
+        detected = bool(props.get(DETECTED_TRANSIT_KEY,
+                                  props.get("transit_like", False)))
+        props["transit_like"] = detected if verdict is None else bool(verdict)
+
+    return [p for p in paths if _edit_harbour_in_file(p, harbour_id, mutate)]
+
+
+def is_transit(props: dict) -> bool:
+    """The effective lock verdict for a harbour: the operator's, else the pipeline's."""
+    verdict = manual_transit(props)
+    if verdict is not None:
+        return verdict
+    return bool(props.get("transit_like", False))
+
+
+def transit_harbours(features: list[dict]) -> list[int]:
+    """Indices of every harbour currently considered a transit site."""
+    return [i for i, f in enumerate(features) if is_transit(f.get("properties", {}))]
 
 
 # ---------------------------------------------------------------------------
@@ -444,6 +488,9 @@ def _build_display_df(features: list[dict]) -> pd.DataFrame:
             "Events":  int(p.get("n_events", 0)),
             "Vessels": int(p.get("n_unique_mmsi", p.get("n_unique_mmsi_approx", 0))),
             "Cells":   int(p.get("n_cells", 0)),
+            # Sortable, so every flagged site can be pulled to the top of the
+            # table without hunting for it on the map.
+            "Lock?":   "⚓" if is_transit(p) else "",
         })
     return pd.DataFrame(rows)
 
@@ -466,6 +513,12 @@ CELLS_STYLE = {
 }
 # The city's other harbours, drawn as context: grey and thin, so the selected
 # harbour stays the obvious subject of the map.
+# A flagged site is drawn in a warning amber so it reads as "look at this",
+# not as an error.
+TRANSIT_OUTLINE_STYLE = {"fillColor": "#FB8C00", "color": "#E65100",
+                         "weight": 2, "fillOpacity": 0.30}
+TRANSIT_BADGE = "⚓ flagged as a possible lock"
+
 SIBLING_OUTLINE_STYLE = {
     "fillColor":   "#78909C",
     "color":       "#37474F",
@@ -538,14 +591,21 @@ def _add_draw_control(m: folium.Map, geom, label: str) -> None:
 def _popup_html(props: dict) -> str:
     """The metadata card shown when a harbour on the map is clicked."""
     vessels = props.get("n_unique_mmsi", props.get("n_unique_mmsi_approx", 0))
-    return f"""
-    <b>{props.get('nearest_city', 'Harbour')}, {props.get('country_name', '')}</b><br/>
-    ID: {props.get('harbour_id', '')[:8]}…<br/>
-    Events: {props.get('n_events', 0):,}<br/>
-    Vessels: {vessels:,}<br/>
-    H3 cells: {props.get('n_cells', 0)}<br/>
-    Draught changes: {props.get('n_draught_changes', 0)}
-    """
+    dwell = props.get("mean_dwell_minutes")
+    lines = [
+        f"<b>{props.get('nearest_city', 'Harbour')}, "
+        f"{props.get('country_name', '')}</b>",
+        f"ID: {props.get('harbour_id', '')[:8]}…",
+        f"Events: {props.get('n_events', 0):,}",
+        f"Vessels: {vessels:,}",
+        f"H3 cells: {props.get('n_cells', 0)}",
+        f"Draught changes: {props.get('n_draught_changes', 0)}",
+    ]
+    if dwell is not None:
+        lines.append(f"Mean dwell: {float(dwell):.0f} min")
+    if is_transit(props):
+        lines.append(f"<b>{TRANSIT_BADGE}</b>")
+    return "<br/>\n    ".join(lines)
 
 
 def _add_harbour_layers(
@@ -598,6 +658,8 @@ def _build_map(
     editable: bool = False,
     siblings: list[dict] | None = None,
     sibling_cells: dict[str, dict] | None = None,
+    sibling_outline_style: dict | None = None,
+    sibling_cells_style: dict | None = None,
 ) -> folium.Map:
     props        = feat.get("properties", {})
     outline_geom = feat.get("geometry")
@@ -608,14 +670,15 @@ def _build_map(
     m = folium.Map(location=[clat, clon], zoom_start=13, tiles=None)
     folium.TileLayer(tiles=tile_url, attr=tile_attr, name=tile_name).add_to(m)
 
-    # The city's other harbours go down first, so the selected one is on top of
-    # them wherever two outlines happen to overlap.
+    # The context harbours go down first — the city's others, or every flagged
+    # site — so the selected one is on top wherever two outlines overlap.
     drawn = []
     for other in siblings or []:
         other_id = other.get("properties", {}).get("harbour_id")
         drawn += _add_harbour_layers(
             m, other, (sibling_cells or {}).get(other_id), show,
-            SIBLING_OUTLINE_STYLE, SIBLING_CELLS_STYLE,
+            sibling_outline_style or SIBLING_OUTLINE_STYLE,
+            sibling_cells_style or SIBLING_CELLS_STYLE,
         )
 
     drawn += _add_harbour_layers(
@@ -638,6 +701,70 @@ def _build_map(
             pass
 
     return m
+
+
+AUTO_LABEL, LOCK_LABEL, HARBOUR_LABEL = "Auto", "Lock", "Not a lock"
+
+
+def _transit_panel(feat: dict, paths: list[str]) -> None:
+    """
+    Let an operator confirm or overrule the lock flag.
+
+    Three states, not two. "Auto" is the absence of a verdict — the pipeline's
+    own answer stands and keeps refreshing on each run — while "Not a lock" is
+    a decision that outranks the detector for good. Collapsing those two into a
+    checkbox would make un-flagging indistinguishable from never having looked,
+    and the next run would simply flag it again.
+    """
+    props = feat.get("properties", {})
+    hid = props.get("harbour_id", "")
+    detected = bool(props.get(DETECTED_TRANSIT_KEY,
+                              props.get("transit_like", False)))
+    stored = manual_transit(props)
+
+    options = [AUTO_LABEL, LOCK_LABEL, HARBOUR_LABEL]
+    current = {None: AUTO_LABEL, True: LOCK_LABEL, False: HARBOUR_LABEL}[stored]
+    detected_text = "a possible lock" if detected else "a harbour"
+
+    with st.expander(
+        "Site type" + (f"  •  {TRANSIT_BADGE}" if is_transit(props) else ""),
+        expanded=False,
+    ):
+        dwell = props.get("mean_dwell_minutes")
+        st.caption(
+            f"The pipeline detected **{detected_text}**"
+            + (f" — mean dwell {float(dwell):.0f} min," if dwell is not None else "")
+            + f" {props.get('n_cargo', 0)} cargo and {props.get('n_tanker', 0)} "
+              f"tanker stops, max {props.get('max_visits_per_mmsi', 0)} visit(s) "
+              "by any one vessel."
+        )
+        choice = st.radio(
+            "Is this a harbour or a ship lock?",
+            options, index=options.index(current), horizontal=True,
+            key=f"transit_choice_{hid}",
+            help="Auto follows the detector and keeps updating. The other two "
+                 "are your decision and survive every future run.",
+        )
+        if st.button("Save site type", key=f"save_transit_{hid}"):
+            verdict = {AUTO_LABEL: None, LOCK_LABEL: True,
+                       HARBOUR_LABEL: False}[choice]
+            # Guard inside the handler: AppTest runs a click even when the
+            # button is disabled, and a stray one must not rewrite a verdict.
+            if verdict == stored:
+                st.info("No change to save.")
+            else:
+                written = save_harbour_transit(paths, hid, verdict)
+                if written:
+                    props[MANUAL_TRANSIT_KEY] = verdict
+                    props["transit_like"] = detected if verdict is None else verdict
+                    st.success(
+                        "Set to Auto — the detector decides again."
+                        if verdict is None
+                        else f"Saved: {choice}."
+                    )
+                    st.cache_data.clear()
+                else:
+                    st.error("Could not write the verdict to any output file.")
 
 
 def _edit_panel(feat: dict, paths: list[str], existing_db: str = "") -> None:
@@ -805,7 +932,7 @@ def _after_save(harbour_id: str, note: str | None, message: str) -> None:
     st.rerun()
 
 
-def _map_legend(show: str, siblings: bool = False) -> None:
+def _map_legend(show: str, siblings: bool = False, locks: bool = False) -> None:
     """Colour key matching the layers currently drawn."""
     swatch = (
         '<span style="display:inline-block;width:11px;height:11px;'
@@ -828,6 +955,12 @@ def _map_legend(show: str, siblings: bool = False) -> None:
             swatch.format(fill=SIBLING_OUTLINE_STYLE["fillColor"],
                           line=SIBLING_OUTLINE_STYLE["color"])
             + "Other harbours in this city"
+        )
+    if locks:
+        entries.append(
+            swatch.format(fill=TRANSIT_OUTLINE_STYLE["fillColor"],
+                          line=TRANSIT_OUTLINE_STYLE["color"])
+            + "Flagged as a possible lock"
         )
     st.markdown(
         '<div style="font-size:0.85em;opacity:0.85;">'
@@ -984,14 +1117,23 @@ def main() -> None:
 
     # ── Metrics row ────────────────────────────────────────────────────────
     vessels = props.get("n_unique_mmsi", props.get("n_unique_mmsi_approx", 0))
-    m1, m2, m3, m4, m5 = st.columns(5)
+    dwell = props.get("mean_dwell_minutes")
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
     m1.metric("Events",          f"{props.get('n_events', 0):,}")
     m2.metric("Vessels",         f"{vessels:,}")
     m3.metric("H3 cells",        props.get("n_cells", 0))
-    m4.metric("Draught changes", props.get("n_draught_changes", 0))
-    m5.metric("Country",         props.get("country_iso2", ""))
+    m4.metric("Mean dwell",      "—" if dwell is None else f"{float(dwell):.0f} min")
+    m5.metric("Draught changes", props.get("n_draught_changes", 0))
+    m6.metric("Country",         props.get("country_iso2", ""))
 
-    # ── Manual property edits ──────────────────────────────────────────────
+    if is_transit(props):
+        st.warning(
+            f"{TRANSIT_BADGE} — vessels pass through rather than stay. "
+            "Open **Site type** below to confirm or overrule."
+        )
+
+    # ── Site type and manual property edits ────────────────────────────────
+    _transit_panel(feat, [output_file, cells_file])
     _edit_panel(feat, [output_file, cells_file],
                 existing_db=cfg.get("phase5", {}).get("existing_db_path", ""))
 
@@ -1001,7 +1143,7 @@ def main() -> None:
     if manual_outline(props):
         edit_label += "  •  manually adjusted"
 
-    edit_col, city_col = st.columns(2)
+    edit_col, city_col, lock_col = st.columns(3)
     editing = edit_col.toggle(
         edit_label, key=f"outline_mode_{hid}",
         help="Turn on to drag the outline's vertices. The map then reports "
@@ -1022,6 +1164,31 @@ def main() -> None:
                  "follow the selection.",
         )
 
+    # Every flagged site, wherever it is — the review view for the lock
+    # detector. Keyed globally for the same reason as the city toggle.
+    flagged_idx = [i for i in transit_harbours(features) if i != global_idx]
+    lock_view = False
+    if flagged_idx or is_transit(props):
+        lock_view = lock_col.toggle(
+            f"Show all {len(flagged_idx) + (1 if is_transit(props) else 0)} "
+            "flagged as locks",
+            key="lock_view",
+            help="Draws every site flagged as a possible lock in amber, "
+                 "wherever it is. Click one to select it.",
+        )
+
+    # The two context views are mutually exclusive: both hand the map a set of
+    # other harbours to draw, and overlaying them would make a click ambiguous.
+    if lock_view:
+        context_idx = flagged_idx
+        context_style = TRANSIT_OUTLINE_STYLE
+    elif city_view:
+        context_idx = sibling_idx
+        context_style = SIBLING_OUTLINE_STYLE
+    else:
+        context_idx = []
+        context_style = SIBLING_OUTLINE_STYLE
+
     fmap = _build_map(
         feat,
         tile_url=selected_tile["url"],
@@ -1030,8 +1197,9 @@ def main() -> None:
         cells_geom=cells_by_id.get(props.get("harbour_id")),
         show=show_geom,
         editable=editing,
-        siblings=[features[i] for i in sibling_idx] if city_view else None,
-        sibling_cells=cells_by_id if city_view else None,
+        siblings=[features[i] for i in context_idx] if context_idx else None,
+        sibling_cells=cells_by_id if context_idx else None,
+        sibling_outline_style=context_style,
     )
 
     # Each returned object costs a rerun per interaction, so ask only for the
@@ -1039,8 +1207,8 @@ def main() -> None:
     # selects a harbour in the city view, nothing at all otherwise.
     if editing:
         mode, returned = "edit", ["all_drawings"]
-    elif city_view:
-        mode, returned = "city", ["last_object_clicked"]
+    elif context_idx:
+        mode, returned = "browse", ["last_object_clicked"]
     else:
         mode, returned = "view", []
 
@@ -1052,11 +1220,11 @@ def main() -> None:
         key=f"map_{hid}_{mode}",
     )
 
-    if mode == "city":
+    if mode == "browse":
         candidates = [
             (features[i].get("properties", {}).get("harbour_id"),
              features[i].get("geometry"))
-            for i in [global_idx, *sibling_idx]
+            for i in [global_idx, *context_idx]
         ]
         clicked = harbour_at_click(candidates,
                                    (map_state or {}).get("last_object_clicked"))
@@ -1075,7 +1243,8 @@ def main() -> None:
             )
         _outline_panel(feat, [output_file, cells_file], output_file, map_state)
 
-    _map_legend(show_geom, siblings=city_view)
+    _map_legend(show_geom, siblings=city_view and not lock_view,
+                locks=lock_view)
 
     # ── Details expander ───────────────────────────────────────────────────
     with st.expander("Full properties",

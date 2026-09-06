@@ -47,6 +47,18 @@ MANUAL_OUTLINE_KEY = "manual_outline_wkt"
 # actually detected and revert a manual edit without waiting for a re-run.
 DETECTED_OUTLINE_KEY = "detected_outline_wkt"
 
+# An operator's verdict on whether a site is a ship lock rather than a harbour.
+# Tri-state, and that is the point: True and False are both decisions, and
+# absent means "no opinion, use whatever Phase 4 detected". A plain bool could
+# not tell "the operator says this is not a lock" from "nobody has looked".
+# Like the outline, it lives outside `manual_overrides`, which is a list of
+# *text* fields.
+MANUAL_TRANSIT_KEY = "manual_transit_like"
+
+# Phase 4's own verdict, kept alongside the effective one so the GUI can show
+# what was detected and offer to revert.
+DETECTED_TRANSIT_KEY = "detected_transit_like"
+
 
 def _is_missing(value: Any) -> bool:
     """True for None and for the NaN that Parquet/pandas use for null strings."""
@@ -118,6 +130,31 @@ def manual_outline(row: Mapping[str, Any]) -> Optional[str]:
     if _is_missing(value) or not isinstance(value, str):
         return None
     return value.strip() or None
+
+
+def manual_transit(row: Mapping[str, Any]) -> Optional[bool]:
+    """
+    An operator's stored lock/not-a-lock verdict, or None when they had none.
+
+    Tri-state, so it survives every round-trip that turns a missing value into
+    something else: None, NaN, an empty string from GeoJSON, or the pd.NA of an
+    Arrow-backed column all read back as "no opinion". Strings are accepted
+    because a GeoJSON round-trip can stringify a bool.
+    """
+    value = row.get(MANUAL_TRANSIT_KEY)
+    if _is_missing(value):
+        return None
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("true", "1", "yes"):
+            return True
+        if text in ("false", "0", "no"):
+            return False
+        return None
+    try:
+        return bool(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def override_values(row: Mapping[str, Any]) -> dict[str, Any]:
