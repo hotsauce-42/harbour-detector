@@ -28,6 +28,8 @@ import app
 from utils import map_assets
 from utils.overrides import (
     DETECTED_TRANSIT_KEY,
+    MANUAL_LOCK_AREA_KEY,
+    manual_lock_area,
     MANUAL_TRANSIT_KEY,
     manual_transit,
 )
@@ -568,7 +570,7 @@ def test_outline_controls_appear_only_in_edit_mode(outputs):
     assert not at.exception
     assert "Save outline" not in [b.label for b in at.button]
 
-    at = at.toggle(key="outline_mode_DE-abcd1234").set_value(True).run()
+    at = at.button_group(key="map_mode_DE-abcd1234").set_value(app.MODE_OUTLINE).run()
 
     assert not at.exception
     labels = [b.label for b in at.button]
@@ -580,7 +582,7 @@ def test_saving_is_blocked_until_something_is_drawn(outputs):
     """st_folium reports no drawings under AppTest, which is the 'nothing drawn'
     case: the button has to stay inert rather than save an empty outline."""
     at = _app_on(outputs)
-    at = at.toggle(key="outline_mode_DE-abcd1234").set_value(True).run()
+    at = at.button_group(key="map_mode_DE-abcd1234").set_value(app.MODE_OUTLINE).run()
 
     before = (outputs / "harbours.geojson").read_text(encoding="utf-8")
     at = _submit(at, "Save outline")
@@ -596,11 +598,11 @@ def test_revert_is_offered_for_a_harbour_with_a_manual_outline(outputs):
                              to_wkt(drawn), None, mapping(drawn))
 
     at = _app_on(outputs)
-    at = at.toggle(key="outline_mode_DE-abcd1234").set_value(True).run()
+    at = at.button_group(key="map_mode_DE-abcd1234").set_value(app.MODE_OUTLINE).run()
 
     assert not at.exception
-    # The toggle's own label doubles as the "this harbour was edited" marker.
-    assert "manually adjusted" in at.toggle(key="outline_mode_DE-abcd1234").label
+    # A caption marks the harbour as edited, covering both drawn geometries.
+    assert any("manually adjusted" in c.value for c in at.caption)
 
 
 # ── Offline map assets ─────────────────────────────────────────────────────
@@ -842,7 +844,7 @@ def test_clicking_a_sibling_selects_it_for_editing(city_outputs,
     # The edit form and the outline editor are keyed by harbour — their
     # presence is what proves the selection actually moved.
     assert at.text_input(key="edit_DE-hamburg02_nearest_city").value == "Hamburg"
-    assert "outline_mode_DE-hamburg02" in [t.key for t in at.toggle]
+    assert "map_mode_DE-hamburg02" in [g.key for g in at.button_group]
 
 
 def test_clicking_open_water_leaves_the_selection_alone(city_outputs,
@@ -998,3 +1000,108 @@ def test_a_cleared_verdict_survives_a_round_trip_through_phase5(tmp_path):
     props = json.loads(outline.read_text())["features"][0]["properties"]
     assert manual_transit(props) is False
     assert app.is_transit(props) is False
+
+
+# ---------------------------------------------------------------------------
+# Marking part of a harbour as a lock
+# ---------------------------------------------------------------------------
+
+# Brunsbüttel's real split: three tug-berth cells east, two lock cells west.
+BRUNS_TUG = ["8b1f1590510dfff", "8b1f15905166fff", "8b1f15905175fff"]
+BRUNS_LOCK = ["8b1f15905c46fff", "8b1f15905c6afff"]
+LOCK_BOX = to_wkt(box(9.140, 53.892, 9.150, 53.897))
+
+
+def _bruns(**props) -> dict:
+    feat = _city_feature("DE-bruns", box(9.14, 53.89, 9.16, 53.90), "Kiel", "DE")
+    feat["properties"].update({"h3_cells": BRUNS_LOCK + BRUNS_TUG})
+    feat["properties"].update(props)
+    return feat
+
+
+def test_only_the_cells_inside_the_drawn_area_count_as_lock():
+    """
+    The point of the feature: Brunsbüttel is a lock *and* a tug berth 406 m
+    apart, one harbour record. Flagging the whole site would call the berth a
+    lock too.
+    """
+    feat = _bruns()
+
+    inside = app.lock_cells_in(feat["properties"], LOCK_BOX)
+
+    assert sorted(inside) == sorted(BRUNS_LOCK)
+    assert not set(inside) & set(BRUNS_TUG)
+
+
+def test_no_drawn_area_means_no_lock_cells():
+    assert app.lock_cells_in(_bruns()["properties"], None) == []
+
+
+def test_unparseable_geometry_yields_no_cells_rather_than_raising():
+    assert app.lock_cells_in(_bruns()["properties"], "NOT WKT") == []
+
+
+def test_a_drawn_area_makes_the_site_read_as_a_lock():
+    """Drawing one is itself a statement that the site contains a lock."""
+    plain = _bruns()
+    marked = _bruns(**{MANUAL_LOCK_AREA_KEY: LOCK_BOX})
+
+    assert app.is_transit(plain["properties"]) is False
+    assert app.is_transit(marked["properties"]) is True
+
+
+def test_an_explicit_verdict_still_overrules_a_drawn_area():
+    """
+    The more direct statement wins. Someone who drew an area and then decided
+    the site is not a lock meant the second thing.
+    """
+    feat = _bruns(**{MANUAL_LOCK_AREA_KEY: LOCK_BOX, MANUAL_TRANSIT_KEY: False})
+
+    assert app.is_transit(feat["properties"]) is False
+
+
+def test_saving_a_lock_area_writes_it_to_every_output_file(tmp_path):
+    feat = _bruns()
+    outline, cells = _write_outputs(tmp_path, [feat])
+
+    written = app.save_harbour_lock_area([str(outline), str(cells)],
+                                         "DE-bruns", LOCK_BOX)
+
+    assert len(written) == 2
+    for path in (outline, cells):
+        props = json.loads(path.read_text())["features"][0]["properties"]
+        assert manual_lock_area(props) == LOCK_BOX
+
+
+def test_clearing_a_lock_area_removes_it_and_its_derived_cells(tmp_path):
+    feat = _bruns(**{MANUAL_LOCK_AREA_KEY: LOCK_BOX, "lock_cells": BRUNS_LOCK})
+    outline, cells = _write_outputs(tmp_path, [feat])
+
+    app.save_harbour_lock_area([str(outline), str(cells)], "DE-bruns", None)
+
+    props = json.loads(outline.read_text())["features"][0]["properties"]
+    assert MANUAL_LOCK_AREA_KEY not in props
+    assert props["lock_cells"] == []
+
+
+def test_the_map_modes_are_mutually_exclusive(tmp_path):
+    """
+    st_folium reports a single `all_drawings`, so only one Draw control may be
+    live. The mode selector is what guarantees it — each mode surfaces its own
+    save button and not the other's.
+    """
+    outputs = tmp_path
+    feat = _bruns()
+    _write_outputs(outputs, [feat])
+    at = _app_on(outputs)
+    key = f"map_mode_{feat['properties']['harbour_id']}"
+
+    at_lock = at.button_group(key=key).set_value(app.MODE_LOCK).run()
+    labels = [b.label for b in at_lock.button]
+    assert "Save lock area" in labels
+    assert "Save outline" not in labels
+
+    at_outline = at_lock.button_group(key=key).set_value(app.MODE_OUTLINE).run()
+    labels = [b.label for b in at_outline.button]
+    assert "Save outline" in labels
+    assert "Save lock area" not in labels

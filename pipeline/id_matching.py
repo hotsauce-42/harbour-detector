@@ -23,10 +23,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+import h3
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
-from shapely.geometry import mapping
+from shapely.geometry import Point, mapping
 from shapely.wkt import dumps as to_wkt
 from shapely.wkt import loads as from_wkt
 
@@ -34,11 +35,13 @@ from utils.geo import haversine_meters, merge_outlines
 from pipeline.h3_aggregation import VESSEL_COUNTS
 from utils.overrides import (
     DETECTED_TRANSIT_KEY,
+    MANUAL_LOCK_AREA_KEY,
     MANUAL_TRANSIT_KEY,
     DETECTED_OUTLINE_KEY,
     EDITABLE_FIELDS,
     MANUAL_OUTLINE_KEY,
     OVERRIDES_KEY,
+    manual_lock_area,
     manual_outline,
     manual_transit,
     normalise_overrides,
@@ -100,6 +103,11 @@ OUTPUT_SCHEMA = pa.schema([
     pa.field("manual_transit_like",    pa.bool_()),
     # Phase 4's own verdict, so the GUI can show what was detected and revert.
     pa.field("detected_transit_like",  pa.bool_()),
+    # A lock drawn over part of a harbour, and the cells it covers. A site can
+    # be a lock *and* a berth; this says which part is which.
+    pa.field("manual_lock_area_wkt",   pa.string()),
+    pa.field("lock_cells",             pa.list_(pa.string())),
+    pa.field("lock_cell_share",        pa.float64()),
 ])
 
 
@@ -219,6 +227,21 @@ def _geojson_to_df(fc: dict) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+@dataclass(frozen=True)
+class ManualState:
+    """
+    Everything an operator has done, keyed by harbour_id.
+
+    One object rather than a widening tuple: these are read together from the
+    existing database, carried together onto matched harbours, and every new
+    kind of manual work adds another member.
+    """
+    overrides: dict[str, dict] = field(default_factory=dict)
+    outlines: dict[str, str] = field(default_factory=dict)
+    transit: dict[str, bool] = field(default_factory=dict)
+    lock_areas: dict[str, str] = field(default_factory=dict)
+
+
 def cell_list(value) -> list[str]:
     """
     Coerce a stored `h3_cells` value into a plain list of cell strings.
@@ -247,22 +270,19 @@ def cell_list(value) -> list[str]:
 
 def _build_indexes(
     existing: pd.DataFrame,
-) -> tuple[
-    dict[str, str], list[dict], dict[str, dict], dict[str, str], dict[str, bool],
-]:
+) -> tuple[dict[str, str], list[dict], ManualState]:
     """
     Returns:
-      cell_index      : h3_cell → harbour_id  (for Jaccard matching)
-      centroid_list   : list of {harbour_id, centroid_lat, centroid_lon, h3_cells}
-      overrides_by_id : harbour_id → {field: manually corrected value}
-      outlines_by_id  : harbour_id → manually drawn outline WKT
-      transit_by_id   : harbour_id → the operator's lock verdict (True or False)
+      cell_index    : h3_cell → harbour_id  (for Jaccard matching)
+      centroid_list : list of {harbour_id, centroid_lat, centroid_lon, h3_cells}
+      manual        : everything an operator has done, see ManualState
     """
     cell_index: dict[str, str] = {}
     centroid_list: list[dict] = []
     overrides_by_id: dict[str, dict] = {}
     outlines_by_id: dict[str, str] = {}
     transit_by_id: dict[str, bool] = {}
+    lock_areas_by_id: dict[str, str] = {}
 
     has_cells = "h3_cells" in existing.columns
 
@@ -283,6 +303,10 @@ def _build_indexes(
         verdict = manual_transit(row)
         if verdict is not None:
             transit_by_id[hid] = verdict
+
+        area = manual_lock_area(row)
+        if area:
+            lock_areas_by_id[hid] = area
 
         if has_cells:
             cells = cell_list(row["h3_cells"])
@@ -310,9 +334,14 @@ def _build_indexes(
     if transit_by_id:
         logger.info("Existing DB carries manual lock verdicts for %d harbours",
                     len(transit_by_id))
+    if lock_areas_by_id:
+        logger.info("Existing DB carries drawn lock areas for %d harbours",
+                    len(lock_areas_by_id))
 
-    return (cell_index, centroid_list, overrides_by_id, outlines_by_id,
-            transit_by_id)
+    return cell_index, centroid_list, ManualState(
+        overrides=overrides_by_id, outlines=outlines_by_id,
+        transit=transit_by_id, lock_areas=lock_areas_by_id,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -413,9 +442,7 @@ def _assign_ids(
     cell_index: dict[str, str],
     centroid_list: list[dict],
     config: Phase5Config,
-    overrides_by_id: Optional[dict[str, dict]] = None,
-    outlines_by_id: Optional[dict[str, str]] = None,
-    transit_by_id: Optional[dict[str, bool]] = None,
+    manual: Optional[ManualState] = None,
 ) -> pd.DataFrame:
     """
     Assign a harbour_id to every cluster and re-apply manual corrections.
@@ -432,15 +459,14 @@ def _assign_ids(
     `_apply_manual_transit`, where it *replaces* Phase 4's rather than merging
     with it.
     """
-    overrides_by_id = overrides_by_id or {}
-    outlines_by_id  = outlines_by_id or {}
-    transit_by_id   = transit_by_id or {}
+    manual = manual or ManualState()
 
     harbour_ids     = []
     matched_flags   = []
     override_lists  = []
     manual_outlines: list[Optional[str]] = []
     manual_transits: list[Optional[bool]] = []
+    manual_lock_areas: list[Optional[str]] = []
     # column → {row position → corrected value}, applied after the loop so the
     # matching itself always runs against the freshly geocoded data.
     patches: dict[str, dict[int, object]] = {}
@@ -484,11 +510,12 @@ def _assign_ids(
         if existing_id:
             harbour_ids.append(existing_id)
             matched_flags.append(True)
-            manual_outlines.append(outlines_by_id.get(existing_id))
-            manual_transits.append(transit_by_id.get(existing_id))
+            manual_outlines.append(manual.outlines.get(existing_id))
+            manual_transits.append(manual.transit.get(existing_id))
+            manual_lock_areas.append(manual.lock_areas.get(existing_id))
             n_matched += 1
 
-            corrected = overrides_by_id.get(existing_id, {})
+            corrected = manual.overrides.get(existing_id, {})
             for column, value in corrected.items():
                 patches.setdefault(column, {})[pos] = value
             fields = [f for f in corrected if f in EDITABLE_FIELDS]
@@ -503,6 +530,7 @@ def _assign_ids(
             override_lists.append([])
             manual_outlines.append(None)
             manual_transits.append(None)
+            manual_lock_areas.append(None)
             n_new += 1
 
     logger.info(
@@ -529,7 +557,67 @@ def _assign_ids(
     enriched[OVERRIDES_KEY]       = override_lists
     enriched[MANUAL_OUTLINE_KEY]  = manual_outlines
     enriched[MANUAL_TRANSIT_KEY]  = manual_transits
+    enriched[MANUAL_LOCK_AREA_KEY] = manual_lock_areas
     return enriched
+
+
+def _apply_manual_lock_area(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Work out which of a harbour's cells lie in the lock area someone drew.
+
+    A site is often a lock *and* a harbour: Brunsbüttel's lock and its tug
+    berth are 406 m apart, which Phase 3 rightly clusters as one record, so a
+    whole-site flag would call the tug berth a lock. The drawn area says which
+    part is which, and `lock_cells` is what a consumer tests a single stop's
+    cell against.
+
+    Membership is decided on each cell's centre, so a cell straddling the drawn
+    edge goes wholly one way — at res 11 that is a ~29 m question, and drawing
+    a slightly generous area is the remedy.
+
+    Nothing here rewrites the drawn area: it is the operator's statement and
+    stays verbatim. Only the derived columns are produced, which means they
+    follow the harbour if a later run changes its cells.
+    """
+    df = df.copy()
+    if MANUAL_LOCK_AREA_KEY not in df.columns:
+        df[MANUAL_LOCK_AREA_KEY] = None
+
+    lock_cells: list[list[str]] = []
+    shares: list[float] = []
+    n_areas = 0
+
+    for _, row in df.iterrows():
+        area_wkt = manual_lock_area(row)
+        cells = cell_list(row.get("h3_cells"))
+        if not area_wkt or not cells:
+            lock_cells.append([])
+            shares.append(0.0)
+            continue
+        try:
+            area = from_wkt(area_wkt)
+        except Exception as exc:
+            logger.warning("Could not parse the lock area for harbour %s: %s",
+                           row.get("harbour_id"), exc)
+            lock_cells.append([])
+            shares.append(0.0)
+            continue
+
+        inside = sorted(
+            cell for cell in cells
+            if area.contains(Point(*reversed(h3.cell_to_latlng(cell))))
+        )
+        lock_cells.append(inside)
+        shares.append(len(inside) / len(cells) if cells else 0.0)
+        if inside:
+            n_areas += 1
+
+    df["lock_cells"] = lock_cells
+    df["lock_cell_share"] = shares
+    if n_areas:
+        logger.info("  %d harbour(s) have a drawn lock area covering part of them",
+                    n_areas)
+    return df
 
 
 def _apply_manual_transit(df: pd.DataFrame) -> pd.DataFrame:
@@ -556,9 +644,13 @@ def _apply_manual_transit(df: pd.DataFrame) -> pd.DataFrame:
     verdicts = [manual_transit({MANUAL_TRANSIT_KEY: v})
                 for v in df[MANUAL_TRANSIT_KEY]]
     df[MANUAL_TRANSIT_KEY] = verdicts
+    # Most specific statement wins: an explicit verdict, else a drawn lock area
+    # (drawing one says the site contains a lock), else the detector.
+    has_area = ([bool(len(c)) for c in df["lock_cells"]]
+                if "lock_cells" in df.columns else [False] * len(df))
     df["transit_like"] = [
-        detected if verdict is None else verdict
-        for detected, verdict in zip(df[DETECTED_TRANSIT_KEY], verdicts)
+        detected or area if verdict is None else verdict
+        for detected, area, verdict in zip(df[DETECTED_TRANSIT_KEY], has_area, verdicts)
     ]
 
     n_applied = sum(1 for v in verdicts if v is not None)
@@ -667,6 +759,13 @@ def _write_parquet(df: pd.DataFrame, out_dir: str, s3_cfg: dict) -> str:
     manual_transit_array = pa.array(
         [manual_transit(row) for _, row in df.iterrows()], type=pa.bool_()
     )
+    lock_area_array = pa.array(
+        [manual_lock_area(row) for _, row in df.iterrows()], type=pa.string()
+    )
+    lock_cells_array = pa.array(
+        [cell_list(v) for v in df.get("lock_cells", [[]] * len(df))],
+        type=pa.list_(pa.string()),
+    )
 
     # Special-cased columns, then the rest straight off OUTPUT_SCHEMA so a new
     # field cannot be added to the schema and silently dropped by the writer.
@@ -677,6 +776,8 @@ def _write_parquet(df: pd.DataFrame, out_dir: str, s3_cfg: dict) -> str:
         MANUAL_OUTLINE_KEY:     manual_outline_array,
         DETECTED_OUTLINE_KEY:   detected_outline_array,
         MANUAL_TRANSIT_KEY:     manual_transit_array,
+        MANUAL_LOCK_AREA_KEY:   lock_area_array,
+        "lock_cells":           lock_cells_array,
     }
     table = pa.table(
         {
@@ -759,6 +860,10 @@ def _write_geojson(
                 "detected_transit_like":  bool(row.get(DETECTED_TRANSIT_KEY,
                                                        row["transit_like"])),
                 "manual_transit_like":    manual_transit(row),
+                "manual_lock_area_wkt":   manual_lock_area(row),
+                "lock_cells":             cell_list(row.get("lock_cells")),
+                "lock_cell_share":        round(
+                    float(row.get("lock_cell_share") or 0), 3),
                 "centroid_lat":           float(row["centroid_lat"]),
                 "centroid_lon":           float(row["centroid_lon"]),
                 "country_iso2":           row["country_iso2"] or "",
@@ -830,23 +935,20 @@ def run_phase5(config: Phase5Config) -> tuple[str, str, str]:
     # Load existing harbour DB (optional)
     cell_index:      dict[str, str]  = {}
     centroid_list:   list[dict]      = []
-    overrides_by_id: dict[str, dict] = {}
-    outlines_by_id:  dict[str, str]  = {}
-    transit_by_id:   dict[str, bool] = {}
+    manual = ManualState()
 
     if config.existing_db_path:
         existing = _load_existing_db(config.existing_db_path, config.s3_cfg)
-        (cell_index, centroid_list, overrides_by_id, outlines_by_id,
-         transit_by_id) = _build_indexes(existing)
+        cell_index, centroid_list, manual = _build_indexes(existing)
     else:
         logger.info(
             "No existing harbour DB supplied — all IDs will be newly generated."
         )
 
     # Assign IDs, then merge in any outline an operator drew for a matched harbour
-    result = _assign_ids(enriched, cell_index, centroid_list, config,
-                         overrides_by_id, outlines_by_id, transit_by_id)
+    result = _assign_ids(enriched, cell_index, centroid_list, config, manual)
     result = _apply_manual_outlines(result, fill_holes=config.outline_fill_holes)
+    result = _apply_manual_lock_area(result)
     result = _apply_manual_transit(result)
 
     # Write outputs

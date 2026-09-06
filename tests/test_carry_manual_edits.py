@@ -138,3 +138,17 @@ def test_a_normal_run_writes_the_merged_file(tmp_path, monkeypatch):
 
     written = json.loads(dst.read_text())["features"][0]["properties"]
     assert written["manual_outline_wkt"] == DRAWN
+
+
+def test_a_drawn_lock_area_travels_across_a_reid():
+    """A re-id must not strip the part of a site someone marked as a lock."""
+    cells = ["8b1f05908259fff"]
+    area = "POLYGON ((9.9 53.5, 9.91 53.5, 9.91 53.51, 9.9 53.51, 9.9 53.5))"
+    old = [_feature("OLD-1", cells, manual_lock_area_wkt=area)]
+    new = [_feature("NEW-9", cells)]
+
+    moved, lost = carry(old, new)
+
+    assert lost == []
+    assert "lock area" in moved[0][4]
+    assert new[0]["properties"]["manual_lock_area_wkt"] == area

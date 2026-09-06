@@ -19,6 +19,7 @@ import os
 import tempfile
 from pathlib import Path
 
+import h3
 import folium
 import pandas as pd
 import streamlit as st
@@ -34,11 +35,13 @@ from utils.geo import clean_polygon, merge_outlines
 from utils.map_assets import VENDOR_URL, is_vendored, use_local_assets
 from utils.overrides import (
     DETECTED_TRANSIT_KEY,
+    MANUAL_LOCK_AREA_KEY,
     MANUAL_TRANSIT_KEY,
     DETECTED_OUTLINE_KEY,
     EDITABLE_FIELDS,
     MANUAL_OUTLINE_KEY,
     OVERRIDES_KEY,
+    manual_lock_area,
     manual_outline,
     manual_transit,
     normalise_overrides,
@@ -268,11 +271,64 @@ def save_harbour_transit(
     return [p for p in paths if _edit_harbour_in_file(p, harbour_id, mutate)]
 
 
+def save_harbour_lock_area(
+    paths: list[str],
+    harbour_id: str,
+    drawn_wkt: str | None,
+) -> list[str]:
+    """
+    Persist the lock area an operator drew over part of a harbour.
+
+    Written to every output file, since either can become the existing database
+    on the next run. `drawn_wkt=None` clears it.
+
+    The harbour keeps its id: this marks a sub-area, it does not split the
+    record. Phase 5 derives `lock_cells` from the polygon; the copy kept here
+    only lets the map redraw before the next pipeline run.
+    """
+    def mutate(feat: dict) -> None:
+        props = feat["properties"]
+        if drawn_wkt:
+            props[MANUAL_LOCK_AREA_KEY] = drawn_wkt
+        else:
+            props.pop(MANUAL_LOCK_AREA_KEY, None)
+            props["lock_cells"] = []
+            props["lock_cell_share"] = 0.0
+
+    return [p for p in paths if _edit_harbour_in_file(p, harbour_id, mutate)]
+
+
+def lock_cells_in(props: dict, area_wkt: str | None) -> list[str]:
+    """
+    Which of a harbour's cells fall inside a drawn area.
+
+    The same rule Phase 5 applies (`_apply_manual_lock_area`), repeated here so
+    the GUI can tell the operator what they just drew without waiting for a
+    pipeline run. Membership is by cell centre.
+    """
+    if not area_wkt:
+        return []
+    try:
+        area = from_wkt(area_wkt)
+    except Exception:
+        return []
+    cells = props.get("h3_cells") or []
+    return sorted(
+        c for c in cells
+        if area.contains(Point(*reversed(h3.cell_to_latlng(c))))
+    )
+
+
 def is_transit(props: dict) -> bool:
-    """The effective lock verdict for a harbour: the operator's, else the pipeline's."""
+    """
+    The effective lock verdict, most specific statement first: an explicit
+    whole-site verdict, then a drawn lock area, then the detector.
+    """
     verdict = manual_transit(props)
     if verdict is not None:
         return verdict
+    if manual_lock_area(props):
+        return True
     return bool(props.get("transit_like", False))
 
 
@@ -519,6 +575,11 @@ TRANSIT_OUTLINE_STYLE = {"fillColor": "#FB8C00", "color": "#E65100",
                          "weight": 2, "fillOpacity": 0.30}
 TRANSIT_BADGE = "⚓ flagged as a possible lock"
 
+# The map's three modes. Exactly one drawing mode can be live, because
+# st_folium hands back a single `all_drawings` and two Draw controls would
+# leave no way to tell which geometry it belongs to.
+MODE_VIEW, MODE_OUTLINE, MODE_LOCK = "View", "Edit outline", "Draw lock area"
+
 SIBLING_OUTLINE_STYLE = {
     "fillColor":   "#78909C",
     "color":       "#37474F",
@@ -565,10 +626,17 @@ def _editable_polygons(geom, style: dict) -> list[folium.Polygon]:
     return polygons
 
 
-def _add_draw_control(m: folium.Map, geom, label: str) -> None:
-    """Put the outline on an editable layer and wire the draw toolbar to it."""
+def _add_draw_control(m: folium.Map, geom, label: str,
+                      style: dict | None = None) -> None:
+    """
+    Put a geometry on an editable layer and wire the draw toolbar to it.
+
+    `geom` may be None — a lock area that has not been drawn yet — in which
+    case the toolbar starts from an empty group and the polygon tool creates
+    the first shape.
+    """
     group = folium.FeatureGroup(name=label)
-    for polygon in _editable_polygons(geom, OUTLINE_STYLE):
+    for polygon in _editable_polygons(geom, style or OUTLINE_STYLE) if geom else []:
         polygon.add_to(group)
     group.add_to(m)
 
@@ -656,6 +724,8 @@ def _build_map(
     cells_geom: dict | None = None,
     show: str = SHOW_OUTLINE,
     editable: bool = False,
+    lock_area: str | None = None,
+    drawing_lock: bool = False,
     siblings: list[dict] | None = None,
     sibling_cells: dict[str, dict] | None = None,
     sibling_outline_style: dict | None = None,
@@ -686,10 +756,35 @@ def _build_map(
         skip_outline=editable,
     )
 
-    if editable and outline_geom:
-        city = props.get("nearest_city", "Harbour")
-        _add_draw_control(m, shape(outline_geom), f"{city} — outline (editing)")
-        drawn.append(outline_geom)
+    stored_lock = None
+    if lock_area:
+        try:
+            stored_lock = from_wkt(lock_area)
+        except Exception:
+            # Shown, not swallowed: a lock area that will not parse is the
+            # operator's to fix, and silently drawing nothing looks like the
+            # area was lost.
+            st.warning("The stored lock area could not be read as geometry.")
+
+    city = props.get("nearest_city", "Harbour")
+    if drawing_lock:
+        # The lock area is what the toolbar edits here — an empty group when
+        # nothing has been drawn yet, so the polygon tool starts from blank.
+        _add_draw_control(m, stored_lock, f"{city} — lock area (drawing)",
+                          style=TRANSIT_OUTLINE_STYLE)
+        if stored_lock is not None:
+            drawn.append(mapping(stored_lock))
+    else:
+        if stored_lock is not None:
+            folium.GeoJson(
+                mapping(stored_lock), name=f"{city} — lock area",
+                style_function=lambda _f: TRANSIT_OUTLINE_STYLE,
+                tooltip="Lock area",
+            ).add_to(m)
+        if editable and outline_geom:
+            _add_draw_control(m, shape(outline_geom),
+                              f"{city} — outline (editing)")
+            drawn.append(outline_geom)
 
     # Fit the view to everything drawn — for one harbour that is its outline
     # (which already covers its cells), for a city view the whole group.
@@ -726,45 +821,44 @@ def _transit_panel(feat: dict, paths: list[str]) -> None:
     current = {None: AUTO_LABEL, True: LOCK_LABEL, False: HARBOUR_LABEL}[stored]
     detected_text = "a possible lock" if detected else "a harbour"
 
-    with st.expander(
-        "Site type" + (f"  •  {TRANSIT_BADGE}" if is_transit(props) else ""),
-        expanded=False,
-    ):
-        dwell = props.get("mean_dwell_minutes")
-        st.caption(
-            f"The pipeline detected **{detected_text}**"
-            + (f" — mean dwell {float(dwell):.0f} min," if dwell is not None else "")
-            + f" {props.get('n_cargo', 0)} cargo and {props.get('n_tanker', 0)} "
-              f"tanker stops, max {props.get('max_visits_per_mmsi', 0)} visit(s) "
-              "by any one vessel."
-        )
-        choice = st.radio(
-            "Is this a harbour or a ship lock?",
-            options, index=options.index(current), horizontal=True,
-            key=f"transit_choice_{hid}",
-            help="Auto follows the detector and keeps updating. The other two "
-                 "are your decision and survive every future run.",
-        )
-        if st.button("Save site type", key=f"save_transit_{hid}"):
-            verdict = {AUTO_LABEL: None, LOCK_LABEL: True,
-                       HARBOUR_LABEL: False}[choice]
-            # Guard inside the handler: AppTest runs a click even when the
-            # button is disabled, and a stray one must not rewrite a verdict.
-            if verdict == stored:
-                st.info("No change to save.")
+    if is_transit(props):
+        st.markdown(f"**{TRANSIT_BADGE}**")
+
+    dwell = props.get("mean_dwell_minutes")
+    st.caption(
+        f"The pipeline detected **{detected_text}**"
+        + (f" — mean dwell {float(dwell):.0f} min," if dwell is not None else "")
+        + f" {props.get('n_cargo', 0)} cargo and {props.get('n_tanker', 0)} "
+          f"tanker stops, max {props.get('max_visits_per_mmsi', 0)} visit(s) "
+          "by any one vessel."
+    )
+    choice = st.radio(
+        "Is this a harbour or a ship lock?",
+        options, index=options.index(current), horizontal=True,
+        key=f"transit_choice_{hid}",
+        help="Auto follows the detector and keeps updating. The other two "
+             "are your decision and survive every future run.",
+    )
+    if st.button("Save site type", key=f"save_transit_{hid}"):
+        verdict = {AUTO_LABEL: None, LOCK_LABEL: True,
+                   HARBOUR_LABEL: False}[choice]
+        # Guard inside the handler: AppTest runs a click even when the
+        # button is disabled, and a stray one must not rewrite a verdict.
+        if verdict == stored:
+            st.info("No change to save.")
+        else:
+            written = save_harbour_transit(paths, hid, verdict)
+            if written:
+                props[MANUAL_TRANSIT_KEY] = verdict
+                props["transit_like"] = detected if verdict is None else verdict
+                st.success(
+                    "Set to Auto — the detector decides again."
+                    if verdict is None
+                    else f"Saved: {choice}."
+                )
+                st.cache_data.clear()
             else:
-                written = save_harbour_transit(paths, hid, verdict)
-                if written:
-                    props[MANUAL_TRANSIT_KEY] = verdict
-                    props["transit_like"] = detected if verdict is None else verdict
-                    st.success(
-                        "Set to Auto — the detector decides again."
-                        if verdict is None
-                        else f"Saved: {choice}."
-                    )
-                    st.cache_data.clear()
-                else:
-                    st.error("Could not write the verdict to any output file.")
+                st.error("Could not write the verdict to any output file.")
 
 
 def _edit_panel(feat: dict, paths: list[str], existing_db: str = "") -> None:
@@ -773,65 +867,63 @@ def _edit_panel(feat: dict, paths: list[str], existing_db: str = "") -> None:
     hid   = props.get("harbour_id", "")
     marked = normalise_overrides(props.get(OVERRIDES_KEY))
 
-    title = "Edit location details"
+    labels = ", ".join(EDITABLE_FIELDS[f] for f in marked)
+
     if marked:
-        labels = ", ".join(EDITABLE_FIELDS[f] for f in marked)
-        title += f"  •  manually set: {labels}"
-
-    with st.expander(title):
+        st.markdown(f"**Manually set:** {labels}")
+    st.caption(
+        "Corrections are written straight into the GeoJSON and recorded "
+        "under `manual_overrides`, so Phase 5 reapplies them whenever this "
+        "harbour is matched again. The harbour ID is not editable — it is "
+        "what the match is keyed on."
+    )
+    # Phase 5 reads its existing database, not this output file. When they
+    # are different files, edits only survive a re-run once they are copied
+    # across — say so rather than implying it happens by itself.
+    if existing_db and Path(existing_db) != Path(paths[0]):
         st.caption(
-            "Corrections are written straight into the GeoJSON and recorded "
-            "under `manual_overrides`, so Phase 5 reapplies them whenever this "
-            "harbour is matched again. The harbour ID is not editable — it is "
-            "what the match is keyed on."
+            f"⚠️ Edits are saved to `{paths[0]}`, but Phase 5 matches "
+            f"against `{existing_db}`. Copy the file across before the next "
+            "run, or point `phase5.existing_db_path` at the output."
         )
-        # Phase 5 reads its existing database, not this output file. When they
-        # are different files, edits only survive a re-run once they are copied
-        # across — say so rather than implying it happens by itself.
-        if existing_db and Path(existing_db) != Path(paths[0]):
-            st.caption(
-                f"⚠️ Edits are saved to `{paths[0]}`, but Phase 5 matches "
-                f"against `{existing_db}`. Copy the file across before the next "
-                "run, or point `phase5.existing_db_path` at the output."
+
+    with st.form(f"edit_{hid}"):
+        cols = st.columns(len(EDITABLE_FIELDS))
+        new_values = {}
+        for col, (field, label) in zip(cols, EDITABLE_FIELDS.items()):
+            new_values[field] = col.text_input(
+                f"{label} ●" if field in marked else label,
+                value=str(props.get(field) or ""),
+                key=f"edit_{hid}_{field}",
             )
+        save_col, clear_col = st.columns([1, 1])
+        submitted = save_col.form_submit_button("Save changes",
+                                                type="primary")
+        cleared = clear_col.form_submit_button(
+            "Clear manual flags", disabled=not marked,
+            help="Keeps the current values but lets the next pipeline run "
+                 "re-derive them from the geocoder.",
+        )
 
-        with st.form(f"edit_{hid}"):
-            cols = st.columns(len(EDITABLE_FIELDS))
-            new_values = {}
-            for col, (field, label) in zip(cols, EDITABLE_FIELDS.items()):
-                new_values[field] = col.text_input(
-                    f"{label} ●" if field in marked else label,
-                    value=str(props.get(field) or ""),
-                    key=f"edit_{hid}_{field}",
-                )
-            save_col, clear_col = st.columns([1, 1])
-            submitted = save_col.form_submit_button("Save changes",
-                                                    type="primary")
-            cleared = clear_col.form_submit_button(
-                "Clear manual flags", disabled=not marked,
-                help="Keeps the current values but lets the next pipeline run "
-                     "re-derive them from the geocoder.",
-            )
+    if submitted:
+        updates, overrides, note = plan_edits(props, new_values)
+        if not updates:
+            st.info("No changes to save.")
+            return
+        written = save_harbour_edits(paths, hid, updates, overrides)
+        if not written:
+            st.error(f"Could not find harbour `{hid}` in any output file.")
+            return
+        changed = [EDITABLE_FIELDS[f] for f in EDITABLE_FIELDS if f in updates]
+        _after_save(hid, note,
+                    f"Saved {', '.join(changed)} to "
+                    f"{', '.join(Path(p).name for p in written)}.")
 
-        if submitted:
-            updates, overrides, note = plan_edits(props, new_values)
-            if not updates:
-                st.info("No changes to save.")
-                return
-            written = save_harbour_edits(paths, hid, updates, overrides)
-            if not written:
-                st.error(f"Could not find harbour `{hid}` in any output file.")
-                return
-            changed = [EDITABLE_FIELDS[f] for f in EDITABLE_FIELDS if f in updates]
-            _after_save(hid, note,
-                        f"Saved {', '.join(changed)} to "
-                        f"{', '.join(Path(p).name for p in written)}.")
-
-        if cleared:
-            written = save_harbour_edits(paths, hid, {}, [])
-            _after_save(hid, None,
-                        "Cleared manual flags — the next pipeline run will "
-                        f"re-derive these fields ({len(written)} file(s) updated).")
+    if cleared:
+        written = save_harbour_edits(paths, hid, {}, [])
+        _after_save(hid, None,
+                    "Cleared manual flags — the next pipeline run will "
+                    f"re-derive these fields ({len(written)} file(s) updated).")
 
 
 def outline_edit_note(detected, drawn) -> str | None:
@@ -851,6 +943,60 @@ def outline_edit_note(detected, drawn) -> str | None:
             "it does not swallow a neighbouring harbour."
         )
     return None
+
+
+def _lock_area_panel(feat: dict, paths: list[str], map_state: dict | None) -> None:
+    """Save / clear controls for the lock area being drawn on the map above."""
+    props = feat.get("properties", {})
+    hid = props.get("harbour_id", "")
+    stored = manual_lock_area(props)
+
+    st.caption(
+        "Draw a polygon (▱) around the part of this site that is a lock — the "
+        "lock chamber and its approach, not the berths. The harbour keeps its "
+        "id: this marks a sub-area, it does not split the record. Cells whose "
+        "centre falls inside are reported as `lock_cells`."
+    )
+
+    drawn_wkt = outline_from_drawings((map_state or {}).get("all_drawings"))
+    if drawn_wkt:
+        inside = lock_cells_in(props, drawn_wkt)
+        total = len(props.get("h3_cells") or [])
+        st.info(f"The area you drew covers {len(inside)} of {total} cells.")
+
+    save_col, clear_col = st.columns([1, 1])
+    save = save_col.button(
+        "Save lock area", type="primary", key=f"save_lock_area_{hid}",
+        disabled=not drawn_wkt,
+        help=None if drawn_wkt else "Draw the lock area on the map first.",
+    )
+    cleared = clear_col.button(
+        "Clear lock area", key=f"clear_lock_area_{hid}", disabled=not stored,
+        help="Removes the drawn area; the whole site falls back to the "
+             "detector's verdict.",
+    )
+
+    if save and not drawn_wkt:
+        # AppTest runs a click even on a disabled button, and saving nothing
+        # would quietly wipe the stored area — which is what Clear is for.
+        st.info("Nothing drawn — the lock area is unchanged.")
+        return
+
+    if save:
+        written = save_harbour_lock_area(paths, hid, drawn_wkt)
+        if not written:
+            st.error("Could not write the lock area to any output file.")
+            return
+        covered = len(lock_cells_in(props, drawn_wkt))
+        _after_save(hid, "Re-run Phase 5 to refresh lock_cells in the outputs.",
+                    f"Saved a lock area covering {covered} cell(s) "
+                    f"({len(written)} file(s) updated).")
+
+    if cleared and stored:
+        written = save_harbour_lock_area(paths, hid, None)
+        if written:
+            _after_save(hid, None,
+                        f"Lock area cleared ({len(written)} file(s) updated).")
 
 
 def _outline_panel(
@@ -1132,23 +1278,34 @@ def main() -> None:
             "Open **Site type** below to confirm or overrule."
         )
 
-    # ── Site type and manual property edits ────────────────────────────────
-    _transit_panel(feat, [output_file, cells_file])
-    _edit_panel(feat, [output_file, cells_file],
-                existing_db=cfg.get("phase5", {}).get("existing_db_path", ""))
-
     # ── Map ────────────────────────────────────────────────────────────────
     hid = props.get("harbour_id", "")
-    edit_label = "Edit outline"
-    if manual_outline(props):
-        edit_label += "  •  manually adjusted"
 
-    edit_col, city_col, lock_col = st.columns(3)
-    editing = edit_col.toggle(
-        edit_label, key=f"outline_mode_{hid}",
-        help="Turn on to drag the outline's vertices. The map then reports "
-             "every edit back to the app, so it redraws on each change.",
-    )
+    # One selector, not two toggles: st_folium reports a single `all_drawings`,
+    # so two live Draw controls would leave no way to tell which geometry came
+    # back. Making the modes exclusive here makes that impossible.
+    mode_col, city_col, lock_col = st.columns([1.4, 1, 1])
+    draw_mode = mode_col.segmented_control(
+        "Map mode", [MODE_VIEW, MODE_OUTLINE, MODE_LOCK],
+        default=MODE_VIEW, key=f"map_mode_{hid}",
+        help="Edit outline drags the harbour's boundary. Draw lock area marks "
+             "the part of the site that is a lock — the harbour keeps its id.",
+    ) or MODE_VIEW
+    editing = draw_mode == MODE_OUTLINE
+    drawing_lock = draw_mode == MODE_LOCK
+
+    # What an operator has already drawn on this harbour. It used to live in
+    # the edit toggle's label; the mode selector is shared, so it needs saying
+    # once, here, where it covers both geometries.
+    edited = []
+    if manual_outline(props):
+        edited.append("outline manually adjusted")
+    if manual_lock_area(props):
+        cells = lock_cells_in(props, manual_lock_area(props))
+        edited.append(f"lock area drawn over {len(cells)} of "
+                      f"{len(props.get('h3_cells') or [])} cells")
+    if edited:
+        st.caption("✏️ " + "  •  ".join(edited))
 
     sibling_idx = city_harbours(features, global_idx)
     city_view = False
@@ -1179,15 +1336,15 @@ def main() -> None:
 
     # The two context views are mutually exclusive: both hand the map a set of
     # other harbours to draw, and overlaying them would make a click ambiguous.
-    if lock_view:
-        context_idx = flagged_idx
-        context_style = TRANSIT_OUTLINE_STYLE
+    # Neither applies while drawing, where the map belongs to the drawing.
+    if drawing_lock or editing:
+        context_idx, context_style = [], SIBLING_OUTLINE_STYLE
+    elif lock_view:
+        context_idx, context_style = flagged_idx, TRANSIT_OUTLINE_STYLE
     elif city_view:
-        context_idx = sibling_idx
-        context_style = SIBLING_OUTLINE_STYLE
+        context_idx, context_style = sibling_idx, SIBLING_OUTLINE_STYLE
     else:
-        context_idx = []
-        context_style = SIBLING_OUTLINE_STYLE
+        context_idx, context_style = [], SIBLING_OUTLINE_STYLE
 
     fmap = _build_map(
         feat,
@@ -1197,6 +1354,8 @@ def main() -> None:
         cells_geom=cells_by_id.get(props.get("harbour_id")),
         show=show_geom,
         editable=editing,
+        lock_area=manual_lock_area(props),
+        drawing_lock=drawing_lock,
         siblings=[features[i] for i in context_idx] if context_idx else None,
         sibling_cells=cells_by_id if context_idx else None,
         sibling_outline_style=context_style,
@@ -1205,8 +1364,8 @@ def main() -> None:
     # Each returned object costs a rerun per interaction, so ask only for the
     # one the current mode acts on: the drawings while editing, the click that
     # selects a harbour in the city view, nothing at all otherwise.
-    if editing:
-        mode, returned = "edit", ["all_drawings"]
+    if editing or drawing_lock:
+        mode, returned = draw_mode, ["all_drawings"]
     elif context_idx:
         mode, returned = "browse", ["last_object_clicked"]
     else:
@@ -1235,28 +1394,46 @@ def main() -> None:
             st.session_state["expand_props"] = True
             st.rerun()
 
-    if editing:
-        if city_view:
+    if editing or drawing_lock:
+        if city_view or lock_view:
             st.caption(
-                "Click-to-select is paused while editing, so a stray click "
-                "cannot swap harbours out from under an unsaved outline."
+                "Click-to-select is paused while drawing, so a stray click "
+                "cannot swap harbours out from under unsaved work."
             )
+    if editing:
         _outline_panel(feat, [output_file, cells_file], output_file, map_state)
+    elif drawing_lock:
+        _lock_area_panel(feat, [output_file, cells_file], map_state)
 
     _map_legend(show_geom, siblings=city_view and not lock_view,
                 locks=lock_view)
 
-    # ── Details expander ───────────────────────────────────────────────────
-    with st.expander("Full properties",
-                     expanded=st.session_state.pop("expand_props", False)):
+    # ── Panels ─────────────────────────────────────────────────────────────
+    # Tabs, not a stack of expanders — but note that st.tabs BUILDS every tab's
+    # content on every run and only hides it client-side. Nothing whose mere
+    # construction has an effect may go in here: no map, and above all no Draw
+    # control, or two would be live at once and st_folium's single
+    # `all_drawings` could not say which geometry it came from.
+    details_tab, location_tab, type_tab = st.tabs(
+        ["Details", "Location", "Site type"]
+    )
+
+    with details_tab:
         display_props = {k: v for k, v in props.items() if k != "h3_cells"}
-        st.json(display_props)
+        st.json(display_props, expanded=st.session_state.pop("expand_props", False))
         h3_cells = props.get("h3_cells", [])
         if h3_cells:
             st.caption(
                 f"{len(h3_cells)} H3 cells (res 11) — "
                 f"first: `{h3_cells[0]}` … last: `{h3_cells[-1]}`"
             )
+
+    with location_tab:
+        _edit_panel(feat, [output_file, cells_file],
+                    existing_db=cfg.get("phase5", {}).get("existing_db_path", ""))
+
+    with type_tab:
+        _transit_panel(feat, [output_file, cells_file])
 
 
 if __name__ == "__main__":

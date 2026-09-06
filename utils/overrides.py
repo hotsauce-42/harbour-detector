@@ -59,6 +59,14 @@ MANUAL_TRANSIT_KEY = "manual_transit_like"
 # what was detected and offer to revert.
 DETECTED_TRANSIT_KEY = "detected_transit_like"
 
+# A lock drawn over *part* of a harbour. A site is often both things at once —
+# Brunsbüttel is a lock and a tug berth 406 m apart, which Phase 3 correctly
+# clusters as one harbour — so the whole-site verdict above cannot describe it.
+# Frozen like MANUAL_OUTLINE_KEY: the pipeline reads it and derives `lock_cells`
+# from it, but never writes it back. Unlike the outline it is not a floor and
+# is merged with nothing; it only selects cells.
+MANUAL_LOCK_AREA_KEY = "manual_lock_area_wkt"
+
 
 def _is_missing(value: Any) -> bool:
     """True for None and for the NaN that Parquet/pandas use for null strings."""
@@ -127,6 +135,20 @@ def manual_outline(row: Mapping[str, Any]) -> Optional[str]:
     # A stored outline is always a string. Anything else is a null in one of the
     # shapes a round-trip produces — None, NaN, or the pd.NA of an Arrow-backed
     # string column, whose str() would otherwise be taken for WKT.
+    if _is_missing(value) or not isinstance(value, str):
+        return None
+    return value.strip() or None
+
+
+def manual_lock_area(row: Mapping[str, Any]) -> Optional[str]:
+    """
+    The lock area an operator drew over part of a harbour, as WKT.
+
+    None when there is none — including the empty strings and NaNs a Parquet or
+    GeoJSON round-trip leaves behind. Not parsed here: this module stays free of
+    a geometry dependency, and the caller has to handle bad geometry anyway.
+    """
+    value = row.get(MANUAL_LOCK_AREA_KEY)
     if _is_missing(value) or not isinstance(value, str):
         return None
     return value.strip() or None

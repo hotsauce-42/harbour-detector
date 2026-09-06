@@ -8,6 +8,7 @@ from typing import Optional
 import h3
 import numpy as np
 import pandas as pd
+import pytest
 import pyarrow as pa
 import pyarrow.parquet as pq
 from shapely.geometry import box, shape
@@ -16,6 +17,9 @@ from shapely.wkt import loads as from_wkt
 
 from pipeline.enrichment import ENRICHED_SCHEMA
 from pipeline.id_matching import (
+    ManualState,
+    _apply_manual_lock_area,
+    _apply_manual_transit,
     _load_existing_db,
     cell_list,
     Phase5Config,
@@ -30,6 +34,7 @@ from pipeline.id_matching import (
 )
 from utils.overrides import (
     DETECTED_OUTLINE_KEY,
+    MANUAL_LOCK_AREA_KEY,
     DETECTED_TRANSIT_KEY,
     MANUAL_OUTLINE_KEY,
     MANUAL_TRANSIT_KEY,
@@ -378,10 +383,12 @@ def test_assign_ids_applies_manual_overrides_on_match():
         "nearest_city":     "Hamburg-Altona",
         "manual_overrides": ["nearest_city"],
     }])
-    cell_idx, centroid_list, overrides, *_ = _build_indexes(existing)
+    cell_idx, centroid_list, manual = _build_indexes(existing)
+    overrides = manual.overrides
 
     config = Phase5Config(interim_dir="", output_dir="")
-    result = _assign_ids(enriched, cell_idx, centroid_list, config, overrides)
+    result = _assign_ids(enriched, cell_idx, centroid_list, config,
+                         ManualState(overrides=overrides))
 
     assert result.iloc[0]["nearest_city"] == "Hamburg-Altona"
     assert list(result.iloc[0]["manual_overrides"]) == ["nearest_city"]
@@ -400,10 +407,12 @@ def test_assign_ids_ignores_unmarked_existing_values():
         "h3_cells":     row["h3_cells"],
         "nearest_city": "Stale Name",       # present, but not marked
     }])
-    cell_idx, centroid_list, overrides, *_ = _build_indexes(existing)
+    cell_idx, centroid_list, manual = _build_indexes(existing)
+    overrides = manual.overrides
 
     config = Phase5Config(interim_dir="", output_dir="")
-    result = _assign_ids(enriched, cell_idx, centroid_list, config, overrides)
+    result = _assign_ids(enriched, cell_idx, centroid_list, config,
+                         ManualState(overrides=overrides))
 
     assert result.iloc[0]["nearest_city"] == "Hamburg"
     assert list(result.iloc[0]["manual_overrides"]) == []
@@ -430,10 +439,12 @@ def test_assign_ids_override_applies_only_to_matching_row():
         "nearest_city":     "Rotterdam-Maasvlakte",
         "manual_overrides": ["nearest_city"],
     }])
-    cell_idx, centroid_list, overrides, *_ = _build_indexes(existing)
+    cell_idx, centroid_list, manual = _build_indexes(existing)
+    overrides = manual.overrides
 
     config = Phase5Config(interim_dir="", output_dir="")
-    result = _assign_ids(enriched, cell_idx, centroid_list, config, overrides)
+    result = _assign_ids(enriched, cell_idx, centroid_list, config,
+                         ManualState(overrides=overrides))
 
     by_cluster = result.set_index("cluster_id")
     assert by_cluster.loc[1, "nearest_city"] == "Rotterdam-Maasvlakte"
@@ -587,7 +598,8 @@ def test_build_indexes_collects_manual_outlines():
         {"harbour_id": "DE-plain", MANUAL_OUTLINE_KEY: None},
     ])
 
-    *_, outlines, _transit = _build_indexes(existing)
+    *_, manual = _build_indexes(existing)
+    outlines = manual.outlines
 
     assert outlines == {"DE-drawn": drawn}
 
@@ -604,11 +616,12 @@ def test_assign_ids_attaches_a_manual_outline_only_to_the_matched_harbour():
         "h3_cells":         hh["h3_cells"],
         MANUAL_OUTLINE_KEY: to_wkt(box(9.9, 53.5, 9.91, 53.51)),
     }])
-    cell_idx, centroid_list, overrides, outlines, _t = _build_indexes(existing)
+    cell_idx, centroid_list, manual = _build_indexes(existing)
+    overrides, outlines = manual.overrides, manual.outlines
 
     config = Phase5Config(interim_dir="", output_dir="")
     result = _assign_ids(enriched, cell_idx, centroid_list, config,
-                         overrides, outlines)
+                         ManualState(overrides=overrides, outlines=outlines))
 
     by_cluster = result.set_index("cluster_id")
     assert by_cluster.loc[0, MANUAL_OUTLINE_KEY] == outlines["legacy-hh-001"]
@@ -921,3 +934,97 @@ def test_uncontested_matching_is_unchanged():
 
     assert list(result["harbour_id"]) == ["a", "b"]
     assert [bool(v) for v in result["matched_existing"]] == [True, True]
+
+
+# ---------------------------------------------------------------------------
+# A lock drawn over part of a harbour
+# ---------------------------------------------------------------------------
+
+BRUNS_TUG = ["8b1f1590510dfff", "8b1f15905166fff", "8b1f15905175fff"]
+BRUNS_LOCK = ["8b1f15905c46fff", "8b1f15905c6afff"]
+LOCK_BOX = to_wkt(box(9.140, 53.892, 9.150, 53.897))
+
+
+def _lock_frame(area=None, manual_verdict=None, detected=False) -> pd.DataFrame:
+    return pd.DataFrame([{
+        "harbour_id": "DE-bruns",
+        "h3_cells": BRUNS_LOCK + BRUNS_TUG,
+        MANUAL_LOCK_AREA_KEY: area,
+        MANUAL_TRANSIT_KEY: manual_verdict,
+        "transit_like": detected,
+        DETECTED_TRANSIT_KEY: detected,
+    }])
+
+
+def test_lock_cells_are_the_cells_inside_the_drawn_area():
+    """
+    Brunsbüttel's lock and its tug berth are 406 m apart in one harbour record.
+    The drawn area is what says which cells are which.
+    """
+    result = _apply_manual_lock_area(_lock_frame(LOCK_BOX)).iloc[0]
+
+    assert sorted(result["lock_cells"]) == sorted(BRUNS_LOCK)
+    assert result["lock_cell_share"] == pytest.approx(2 / 5)
+
+
+def test_no_drawn_area_leaves_the_cells_empty():
+    result = _apply_manual_lock_area(_lock_frame(None)).iloc[0]
+
+    assert list(result["lock_cells"]) == []
+    assert result["lock_cell_share"] == 0.0
+
+
+def test_unparseable_lock_geometry_is_skipped_not_fatal():
+    """One bad polygon in the database must not cost a whole run."""
+    result = _apply_manual_lock_area(_lock_frame("NOT WKT")).iloc[0]
+
+    assert list(result["lock_cells"]) == []
+
+
+def test_a_drawn_area_marks_the_site_as_transit():
+    frame = _apply_manual_lock_area(_lock_frame(LOCK_BOX, detected=False))
+
+    assert bool(_apply_manual_transit(frame).iloc[0]["transit_like"]) is True
+
+
+def test_an_explicit_verdict_outranks_a_drawn_area():
+    frame = _apply_manual_lock_area(
+        _lock_frame(LOCK_BOX, manual_verdict=False, detected=True)
+    )
+
+    assert bool(_apply_manual_transit(frame).iloc[0]["transit_like"]) is False
+
+
+def test_a_lock_area_survives_a_phase5_run_without_changing_the_id(tmp_path):
+    """
+    The whole design in one assertion: marking a sub-area annotates, it does
+    not split, so the harbour keeps its identity.
+    """
+    row = _enriched_row(0, HAMBURG_LAT, HAMBURG_LON)
+    outline = _detected_outline(HAMBURG_LAT, HAMBURG_LON)
+    row["geometry_wkt"] = outline
+    row["outline_wkt"] = outline
+    _write_enriched([row], tmp_path / "harbours_enriched.parquet")
+
+    # An area covering part of the harbour's cells.
+    lat, lon = h3.cell_to_latlng(row["h3_cells"][0])
+    area = to_wkt(box(lon - 0.0002, lat - 0.0002, lon + 0.0002, lat + 0.0002))
+    db_path = tmp_path / "existing.geojson"
+    _existing_db_geojson(db_path, {
+        "harbour_id": "legacy-hh-001",
+        "centroid_lat": HAMBURG_LAT,
+        "centroid_lon": HAMBURG_LON,
+        "h3_cells": row["h3_cells"],
+        MANUAL_LOCK_AREA_KEY: area,
+    })
+
+    parquet_path, _, _ = run_phase5(
+        _base_config(tmp_path, existing_db=str(db_path))
+    )
+    result = pd.read_parquet(parquet_path).iloc[0]
+
+    assert result["harbour_id"] == "legacy-hh-001"       # id untouched
+    assert result[MANUAL_LOCK_AREA_KEY] == area          # drawn area verbatim
+    assert len(result["lock_cells"]) >= 1
+    assert len(result["lock_cells"]) < len(row["h3_cells"])
+    assert bool(result["transit_like"]) is True
