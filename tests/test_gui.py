@@ -653,6 +653,25 @@ def test_local_assets_leave_no_external_request_but_the_tiles(
     assert "L.Control.Draw" in page
 
 
+def test_local_assets_include_jquery_because_folium_popups_need_it(
+    outputs, folium_assets_restored
+):
+    """
+    folium's Popup template builds its content with `$(...)`, and every harbour
+    layer carries a popup. Dropping jquery as "unused" leaves `$ is not defined`
+    in the one inline script that also builds the map — a blank box offline,
+    while the CDN page keeps working. Both halves are asserted so the day
+    folium stops using jquery, this fails loudly instead of vendoring 85 KB
+    forever.
+    """
+    map_assets.use_local_assets()
+    feats = app.load_features.__wrapped__(str(outputs / "harbours.geojson"))
+    page = _page(feats[0])  # view mode — the outline layer carries the popup
+
+    assert "$(" in page
+    assert map_assets.asset_urls()["jquery"] in page
+
+
 def test_local_assets_survive_a_streamlit_rerun(folium_assets_restored):
     """Streamlit re-runs the script on every interaction, so it runs repeatedly."""
     map_assets.use_local_assets()

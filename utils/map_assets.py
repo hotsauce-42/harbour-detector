@@ -3,9 +3,9 @@ Serve the map's Leaflet assets from the app itself, for offline deployments.
 
 folium renders a page that pulls six libraries from four public CDNs. In a
 sealed network none of them load and the map is a blank box — including
-Leaflet.Draw, which is the whole outline editor. `scripts/vendor_map_assets.py`
-downloads the two libraries that matter into `static/vendor/`, and
-`use_local_assets()` repoints folium at those copies.
+Leaflet.Draw, which is the whole outline editor.
+`scripts/vendor_map_assets.py` downloads the three libraries that matter into
+`static/vendor/`, and `use_local_assets()` repoints folium at those copies.
 
 Tile servers are a separate concern: they are plain config (`gui.map_tiles`).
 """
@@ -16,11 +16,16 @@ import folium
 from folium.plugins import Draw
 
 # folium's base template loads jquery, bootstrap, glyphicons, fontawesome and
-# awesome-markers on every map. Nothing in this GUI uses them — in the rendered
-# page they appear only as their own <script>/<link> tags — so they are dropped
-# rather than vendored, and an offline browser makes no dead requests at all.
-# Adding a folium plugin that needs them means adding its key here.
-KEEP = ("leaflet", "leaflet_css", "leaflet_draw_js", "leaflet_draw_css")
+# awesome-markers on every map. The GUI references none of them by name, but
+# jquery is not optional: folium's own `Popup` template builds its content with
+# `$(`...`)[0]`, and every harbour layer carries a popup. Without it the first
+# popup raises `$ is not defined`, which aborts the single inline <script> that
+# also creates the map, the tile layer and the Draw control — a blank box, the
+# exact failure vendoring is supposed to prevent. The other four are dropped, so
+# an offline browser makes no dead requests at all. Adding a folium plugin that
+# needs one of them means adding its key here.
+KEEP = ("leaflet", "leaflet_css", "jquery",
+        "leaflet_draw_js", "leaflet_draw_css")
 
 # Files the stylesheets pull in by relative URL, plus the marker icons that
 # leaflet.js resolves at runtime. Paths are relative to the stylesheet's URL,

@@ -2,8 +2,9 @@
 """
 Download the map's Leaflet assets into static/vendor/ so the GUI works offline.
 
-Without this, folium's page fetches Leaflet and Leaflet.Draw from public CDNs
-and an air-gapped browser renders a blank box. Run it once on a machine with
+Without this, folium's page fetches Leaflet, Leaflet.Draw and jQuery (which
+folium's popups are built with) from public CDNs and an air-gapped browser
+renders a blank box. Run it once on a machine with
 internet; `static/vendor/` is gitignored, so either copy the directory to the
 target host or run this during an image build.
 

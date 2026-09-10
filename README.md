@@ -302,8 +302,9 @@ server. Leaving them in place costs a DNS timeout each time one is selected.
 
 **2. Leaflet itself.** folium's page loads six libraries from four public CDNs.
 Offline, none of them arrive and the map is a blank box — `leaflet.draw` among
-them, which is the outline editor. Download the two that this app actually uses
-(the other four are unreferenced and get dropped):
+them, which is the outline editor, and jQuery, which folium's own popups are
+built with. Download the three that are actually needed (the other three are
+unreferenced and get dropped):
 
 ```bash
 python3 scripts/vendor_map_assets.py          # → static/vendor/, needs internet
