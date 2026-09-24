@@ -1,0 +1,258 @@
+component_id,cardinality,old_id,new_id,old_name,new_nearest_city,name_match,old_country,new_country,country_match,iou,coverage_old,coverage_new,area_old_m2,area_new_m2,inter_m2,gap_m,centroid_m,n_events,n_unique_mmsi,transit_like
+314,1:1,SE-d303d320,SE-d303d320,Fotö,Fotö,exact,SE,SE,same,1.0,1.0,1.0,5516.0,5516.0,5516.0,0.0,9.5,12,6,False
+228,1:1,NO-667f4718,NO-667f4718,Fredrikstad,Fredrikstad,exact,NO,NO,same,1.0,1.0,1.0,3309.4,3309.4,3309.4,0.0,27.8,6,4,False
+220,1:1,NO-24e132da,NO-24e132da,Lyngør,Lyngør,exact,NO,NO,same,1.0,1.0,1.0,5889.4,5889.4,5889.4,0.0,19.2,12,5,False
+95,1:1,DK-5d1e5836,DK-5d1e5836,Nibe,Nibe,exact,DK,DK,same,1.0,1.0,1.0,4647.7,4647.7,4647.7,0.0,17.4,7,6,False
+238,1:1,PL-0d0bf489,PL-0d0bf489,Kołobrzeg,Kołobrzeg,exact,PL,PL,same,1.0,1.0,1.0,4138.1,4138.1,4138.1,0.0,4.4,5,5,False
+114,1:1,DK-7549d96c,DK-7549d96c,Ishøj,Ishøj,exact,DK,DK,same,1.0,1.0,1.0,3531.2,3531.2,3531.2,0.0,11.8,9,6,False
+22,1:1,DE-97427fdc,DE-97427fdc,Laboe,Laboe,exact,DE,DE,same,1.0,1.0,1.0,17264.3,17264.3,17264.3,0.0,20.4,33,13,False
+250,1:1,SE-23d22235,SE-23d22235,Rinkenäs,Rinkenäs,exact,SE,SE,same,1.0,1.0,1.0,3831.9,3831.9,3831.9,0.0,7.2,9,4,False
+36,1:1,DE-c807d733,DE-c807d733,Bekenreihe,Bekenreihe,exact,DE,DE,same,1.0,1.0,1.0,3978.6,3978.6,3978.6,0.0,4.8,5,4,False
+230,1:1,NO-8262d2c1,NO-8262d2c1,Velvika,Velvika,exact,NO,NO,same,1.0,1.0,1.0,4297.5,4297.5,4297.5,0.0,8.6,10,5,False
+147,1:1,DK-9dddb305,DK-9dddb305,Hellerup,Hellerup,exact,DK,DK,same,1.0,1.0,1.0,10118.8,10118.8,10118.8,0.0,26.5,9,8,False
+31,1:1,DE-b80558a3,DE-b80558a3,Brunshausen,Brunshausen,exact,DE,DE,same,1.0,1.0,1.0,4019.7,4019.7,4019.7,0.0,4.6,5,4,False
+115,1:1,DK-75719b52,DK-75719b52,Gedser,Gedser,exact,DK,DK,same,1.0,1.0,1.0,3617.8,3617.8,3617.8,0.0,78.6,8,4,False
+1,1:1,DE-08b5146c,DE-08b5146c,Brunsbütelkoog,Brunsbütelkoog,exact,DE,DE,same,1.0,1.0,1.0,11375.6,11375.6,11375.6,0.0,1.2,10,9,True
+311,1:1,SE-cfa4e481,SE-cfa4e481,Torekov,Torekov,exact,SE,SE,same,1.0,1.0,1.0,15810.4,15810.4,15810.4,0.0,8.5,24,17,False
+241,1:1,SE-0b0e0a28,SE-0b0e0a28,Sjöviken,Sjöviken,exact,SE,SE,same,1.0,1.0,1.0,3793.8,3793.8,3793.8,0.0,21.6,9,5,False
+122,1:1,DK-82ff8aa9,DK-82ff8aa9,Horsens,Horsens,exact,DK,DK,same,1.0,1.0,1.0,4539.1,4539.1,4539.1,0.0,20.6,6,4,False
+258,1:1,SE-3b0fde55,SE-3b0fde55,Strömstad,Strömstad,exact,SE,SE,same,1.0,1.0,1.0,9356.3,9356.3,9356.3,0.0,49.1,26,12,False
+23,1:1,DE-984989ea,DE-984989ea,Heiligenhafen,Heiligenhafen,exact,DE,DE,same,1.0,1.0,1.0,130247.3,130247.3,130247.3,0.0,19.8,114,53,False
+195,1:1,DK-dddffc09,DK-dddffc09,Drejø,Drejø,exact,DK,DK,same,1.0,1.0,1.0,6421.7,6421.7,6421.7,0.0,3.9,11,9,False
+231,1:1,NO-9a4354d4,NO-9a4354d4,Utgård,Utgård,exact,NO,NO,same,1.0,1.0,1.0,3168.8,3168.8,3168.8,0.0,0.0,6,4,False
+18,1:1,DE-7f94254d,DE-7f94254d,Flensburg,Flensburg,exact,DE,DE,same,1.0,1.0,1.0,17697.6,17697.6,17697.6,0.0,16.6,29,17,False
+139,1:1,DK-95a6ba96,DK-95a6ba96,Havhuse,Havhuse,exact,DK,DK,same,1.0,1.0,1.0,3832.5,3832.5,3832.5,0.0,4.2,5,4,False
+262,1:1,SE-42d4d449,SE-42d4d449,Röd,Röd,exact,SE,SE,same,1.0,1.0,1.0,5780.5,5780.5,5780.5,0.0,11.0,11,8,False
+275,1:1,SE-6989c1ca,SE-6989c1ca,Klagshamn,Klagshamn,exact,SE,SE,same,1.0,1.0,1.0,7239.2,7239.2,7239.2,0.0,24.6,7,6,False
+279,1:1,SE-73013a71,SE-73013a71,Skillinge,Skillinge,exact,SE,SE,same,1.0,1.0,1.0,7147.6,7147.6,7147.6,0.0,3.4,8,7,False
+125,1:1,DK-858d48bb,DK-858d48bb,Østerby,Østerby,exact,DK,DK,same,1.0,1.0,1.0,3949.0,3949.0,3949.0,0.0,5.7,8,8,False
+317,1:1,SE-de1e1599,SE-de1e1599,Halmstad,Halmstad,exact,SE,SE,same,1.0,1.0,1.0,3810.4,3810.4,3810.4,0.0,5.6,8,4,False
+260,1:1,SE-3ddbcc15,SE-3ddbcc15,Halsbäck,Önneröd,differs,SE,SE,same,1.0,1.0,1.0,3671.4,3671.4,3671.4,0.0,9.3,11,5,False
+268,1:1,SE-53b0827b,SE-53b0827b,Bua,Bua,exact,SE,SE,same,1.0,1.0,1.0,10931.2,10931.2,10931.2,0.0,5.3,26,9,False
+226,1:1,NO-4aa39841,NO-4aa39841,Fredrikstad,Fredrikstad,exact,NO,NO,same,1.0,1.0,1.0,5435.7,5435.7,5435.7,0.0,5.0,17,4,False
+116,1:1,DK-76f5c3a5,DK-76f5c3a5,Norsminde,Norsminde,exact,DK,DK,same,1.0,1.0,1.0,3852.7,3852.7,3852.7,0.0,10.5,8,4,False
+234,1:1,NO-ad654934,NO-ad654934,Kilen,Kilen,exact,NO,NO,same,1.0,1.0,1.0,4763.5,4763.5,4763.5,0.0,0.0,6,4,False
+0,1:1,DE-011a4f21,DE-011a4f21,Kiel,Kiel,exact,DE,DE,same,1.0,1.0,1.0,9071.1,9071.1,9071.1,0.0,7.5,20,5,False
+16,1:1,DE-7bdd1380,DE-7bdd1380,Kloster,Kloster,exact,DE,DE,same,1.0,1.0,1.0,3985.8,3985.8,3985.8,0.0,6.0,8,5,False
+10,1:1,DE-4186b704,DE-4186b704,Kiel,Kiel,exact,DE,DE,same,1.0,1.0,1.0,3600.5,3600.5,3600.5,0.0,13.5,11,5,False
+33,1:1,DE-c115fc7d,DE-c115fc7d,Cuxhaven,Cuxhaven,exact,DE,DE,same,1.0,1.0,1.0,6208.3,6208.3,6208.3,0.0,80.3,8,6,False
+289,1:1,SE-94e117cd,SE-94e117cd,Stallen,Malmön,differs,SE,SE,same,1.0,1.0,1.0,4637.6,4637.6,4637.6,0.0,3.9,9,4,False
+221,1:1,NO-2a1eb072,NO-2a1eb072,Skjærhalden,Skjærhalden,exact,NO,NO,same,1.0,1.0,1.0,7040.1,7040.1,7040.1,0.0,20.0,20,9,False
+6,1:1,DE-2a1e827e,DE-2a1e827e,Büsum,Büsum,exact,DE,DE,same,1.0,1.0,1.0,7255.0,7255.0,7255.0,0.0,3.5,6,6,False
+7,1:1,DE-2c1edc4f,DE-2c1edc4f,Cuxhaven,Cuxhaven,exact,DE,DE,same,1.0,1.0,1.0,6157.9,6157.9,6157.9,0.0,1.8,6,6,False
+304,1:1,SE-c44e0172,SE-c44e0172,Trelleborg,Trelleborg,exact,SE,SE,same,1.0,1.0,1.0,3567.8,3567.8,3567.8,0.0,22.1,5,4,False
+54,1:1,DK-1241a7e9,DK-1241a7e9,Hanehoved,Hanehoved,exact,DK,DK,same,1.0,1.0,1.0,4852.8,4852.8,4852.8,0.0,13.7,6,5,False
+267,1:1,SE-51ad908a,SE-51ad908a,Malmö,Malmö,exact,SE,SE,same,1.0,1.0,1.0,3877.2,3877.2,3877.2,0.0,2.7,9,4,False
+56,1:1,DK-134e99dc,DK-134e99dc,Dyreborg,Dyreborg,exact,DK,DK,same,1.0,1.0,1.0,3872.6,3872.6,3872.6,0.0,2.6,9,5,False
+176,1:1,DK-c4339317,DK-c4339317,Skarø By,Skarø By,exact,DK,DK,same,1.0,1.0,1.0,6454.9,6454.9,6454.9,0.0,5.4,7,7,False
+57,1:1,DK-13898e13,DK-13898e13,Årø,Årø,exact,DK,DK,same,1.0,1.0,1.0,7788.7,7788.7,7788.7,0.0,2.5,29,19,False
+233,1:1,NO-a414bf55,NO-a414bf55,Skinsnes,Skinsnes,exact,NO,NO,same,1.0,1.0,1.0,3584.0,3584.0,3584.0,0.0,0.0,12,4,False
+222,1:1,NO-2afe500e,NO-2afe500e,Kristiansand,Kristiansand,exact,NO,NO,same,1.0,1.0,1.0,3543.0,3543.0,3543.0,0.0,3.1,14,4,False
+193,1:1,DK-dc1aa01e,DK-dc1aa01e,Avernak By,Avernak By,exact,DK,DK,same,1.0,1.0,1.0,6351.1,6351.1,6351.1,0.0,5.8,15,10,False
+286,1:1,SE-8810b582,SE-8810b582,Ellös,Ellös,exact,SE,SE,same,1.0,1.0,1.0,1633.3,1633.3,1633.3,0.0,0.0,7,4,False
+46,1:1,DK-02ee6661,DK-02ee6661,Svaneke,Svaneke,exact,DK,DK,same,1.0,1.0,1.0,6005.3,6005.3,6005.3,0.0,7.2,14,8,False
+39,1:1,DE-cf094337,DE-cf094337,Lütjenbrode,Lütjenbrode,exact,DE,DE,same,1.0,1.0,1.0,3965.2,3965.2,3965.2,0.0,10.9,11,4,False
+281,1:1,SE-7376d3de,SE-7376d3de,Skrea Strand,Skrea Strand,exact,SE,SE,same,1.0,1.0,1.0,3565.1,3565.1,3565.1,0.0,35.4,7,4,False
+8,1:1,DE-3427a4b5,DE-3427a4b5,Strande,Schilksee,differs,DE,DE,same,1.0,1.0,1.0,4388.5,4388.5,4388.5,0.0,27.7,7,4,False
+259,1:1,SE-3d5501e2,SE-3d5501e2,Viken,Viken,exact,SE,SE,same,1.0,1.0,1.0,1741.8,1741.8,1741.8,0.0,0.0,6,4,False
+184,1:1,DK-cdfe27ee,DK-cdfe27ee,Copenhagen,Copenhagen,exact,DK,DK,same,1.0,1.0,1.0,3938.2,3938.2,3938.2,0.0,4.3,10,6,False
+93,1:1,DK-59f1218c,DK-59f1218c,Grenå Strand,Grenå Strand,exact,DK,DK,same,0.9975,0.9975,1.0,39700.6,39599.5,39599.5,0.0,21.2,83,78,False
+24,1:1,DE-99c56075,DE-99c56075,Warnemünde,Warnemünde,exact,DE,DE,same,0.9914,0.9914,1.0,212769.8,210940.6,210940.6,0.0,272.4,68,25,False
+113,1:1,DK-71e21174,DK-71e21174,Vesterø Havn,Vesterø Havn,exact,DK,DK,same,0.9897,0.9897,1.0,27198.9,26917.6,26917.6,0.0,16.6,60,47,False
+157,1:1,DK-adf2cdb2,DK-adf2cdb2,Skagen port,Skagen port,exact,DK,DK,same,0.9732,0.9732,1.0,293466.9,285598.3,285598.3,0.0,52.9,134,99,False
+282,1:1,SE-75c3d9d6,SE-75c3d9d6,Tvestjärten,Tvestjärten,exact,SE,SE,same,0.9564,0.9564,1.0,16738.3,16008.6,16008.5,0.0,9.3,24,13,False
+90,1:1,DK-4d9f3f40,DK-4d9f3f40,Klintholm Havn,Klintholm Havn,exact,DK,DK,same,0.9555,0.9555,1.0,80702.9,77113.2,77113.2,0.0,45.3,106,89,False
+171,1:1,DK-c148eb69,DK-c148eb69,Bagenkop,Bagenkop,exact,DK,DK,same,0.9164,0.9164,1.0,23669.2,21690.9,21690.9,0.0,8.0,63,49,False
+51,1:1,DK-0bb35b1c,DK-0bb35b1c,Stubbekøbing,Stubbekøbing,exact,DK,DK,same,0.9114,0.9114,1.0,32867.6,29957.0,29957.0,0.0,7.8,38,33,False
+119,1:1,DK-7de6a2f9,DK-7de6a2f9,Østerby Havn,Østerby Havn,exact,DK,DK,same,0.9046,0.9046,1.0,50477.0,45662.9,45662.9,0.0,29.2,73,59,False
+167,1:1,DK-bbd08453,DK-bbd08453,Hals,Hals,exact,DK,DK,same,0.8999,0.8999,1.0,22201.6,19978.9,19978.9,0.0,15.6,53,38,False
+94,1:1,DK-5ad1b638,DK-5ad1b638,Holm,Holm,exact,DK,DK,same,0.8992,0.8992,1.0,37088.0,33348.5,33348.5,0.0,15.4,68,46,False
+21,1:1,DE-956c6b10,DE-956c6b10,Olpenitzdorf,Olpenitzdorf,exact,DE,DE,same,0.8938,0.8938,1.0,13261.6,11853.2,11853.2,0.0,7.0,8,8,False
+170,1:1,DK-c0a906f4,DK-c0a906f4,Dragør,Dragør,exact,DK,DK,same,0.8914,0.8914,1.0,51726.9,46111.0,46111.0,0.0,20.9,52,45,False
+151,1:1,DK-a39f92c1,DK-a39f92c1,Karrebæksminde,Karrebæksminde,exact,DK,DK,same,0.8913,0.8913,1.0,29620.4,26401.6,26401.5,0.0,92.0,32,30,False
+202,1:1,DK-e74b168a,DK-e74b168a,Marstal,Marstal,exact,DK,DK,same,0.8825,0.8941,0.9856,105178.3,95411.2,94035.5,0.0,68.2,177,143,False
+187,1:1,DK-d2bfb0b5,DK-d2bfb0b5,Sønderby,Sønderby,exact,DK,DK,same,0.882,0.882,1.0,12186.1,10747.6,10747.6,0.0,9.2,18,14,False
+53,1:1,DK-0fee426c,DK-0fee426c,Copenhagen,Copenhagen,exact,DK,DK,same,0.8777,0.8777,1.0,15653.6,13739.6,13739.6,0.0,51.3,39,24,False
+209,1:1,DK-f790431d,DK-f790431d,Ærøskøbing,Ærøskøbing,exact,DK,DK,same,0.8612,0.8691,0.9896,54917.3,48226.8,47727.2,0.0,21.4,68,58,False
+208,1:1,DK-f72f41b9,DK-f72f41b9,Juelsminde,Juelsminde,exact,DK,DK,same,0.8605,0.8605,1.0,84680.9,72866.6,72866.6,0.0,109.0,66,52,False
+69,1:1,DK-2a981ea0,DK-2a981ea0,Haderslev,Haderslev,exact,DK,DK,same,0.8599,0.8599,1.0,28425.7,24443.2,24443.2,0.0,64.7,40,31,False
+174,1:1,DK-c22527b2,DK-c22527b2,Ballen,Ballen,exact,DK,DK,same,0.8508,0.8508,1.0,28217.7,24007.6,24007.6,0.0,1.9,48,36,False
+213,1:1,DK-fcb2637f,DK-fcb2637f,Omø By,Omø By,exact,DK,DK,same,0.8471,0.8471,1.0,12830.5,10868.8,10868.8,0.0,19.0,24,18,False
+150,1:1,DK-a3447192,DK-a3447192,Svendborg,Svendborg,exact,DK,DK,same,0.8447,0.8447,1.0,50987.6,43066.9,43066.8,0.0,51.6,90,81,False
+101,1:1,DK-64988345,DK-64988345,Rudkøbing,Rudkøbing,exact,DK,DK,same,0.844,0.844,1.0,46857.5,39549.6,39549.6,0.0,47.7,46,40,False
+291,1:1,SE-9ba2a35b,SE-9ba2a35b,Vrångö,Vrångö,exact,SE,SE,same,0.8423,0.8423,1.0,22254.1,18744.0,18744.0,0.0,27.3,27,17,False
+263,1:1,SE-4315dc80,SE-4315dc80,Varberg,Varberg,exact,SE,SE,same,0.8422,0.8422,1.0,30716.2,25868.7,25868.7,0.0,17.8,30,26,False
+145,1:1,DK-9c59252c,DK-9c59252c,Rødvig,Rødvig,exact,DK,DK,same,0.8388,0.8388,1.0,40363.3,33855.6,33855.6,0.0,20.3,37,30,False
+105,1:1,DK-69a905eb,DK-69a905eb,Sæby,Sæby,exact,DK,DK,same,0.8312,0.8312,1.0,49101.8,40812.7,40812.7,0.0,16.5,54,44,False
+190,1:1,DK-d5198fde,DK-d5198fde,Mårup,Mårup,exact,DK,DK,same,0.8301,0.8301,1.0,11489.9,9537.9,9537.9,0.0,11.9,23,20,False
+48,1:1,DK-080ac9e3,DK-080ac9e3,Kragenæs,Kragenæs,exact,DK,DK,same,0.8292,0.8292,1.0,14922.8,12373.4,12373.4,0.0,2.9,14,12,False
+203,1:1,DK-ead3d9f1,DK-ead3d9f1,Anholt,Anholt,exact,DK,DK,same,0.8227,0.8227,1.0,32710.2,26910.7,26910.7,0.0,24.9,95,92,False
+153,1:1,DK-a778a380,DK-a778a380,Agersø By,Agersø By,exact,DK,DK,same,0.8158,0.8158,1.0,7798.6,6362.4,6362.4,0.0,5.3,8,8,False
+197,1:1,DK-e03df3c5,DK-e03df3c5,Tunø By,Tunø By,exact,DK,DK,same,0.8114,0.8114,1.0,19323.2,15679.7,15679.7,0.0,13.4,37,33,False
+132,1:1,DK-8efce8e7,DK-8efce8e7,Allinge,Allinge,exact,DK,DK,same,0.8075,0.8075,1.0,12564.7,10146.3,10146.3,0.0,7.2,17,11,False
+128,1:1,DK-874895f8,DK-874895f8,Kastrup,Kastrup,exact,DK,DK,same,0.8071,0.8071,1.0,11103.7,8961.3,8961.3,0.0,11.1,17,14,False
+49,1:1,DK-09d43677,DK-09d43677,Gilleleje,Gilleleje,exact,DK,DK,same,0.8062,0.8062,1.0,79114.1,63779.8,63779.8,0.0,26.9,88,72,False
+65,1:1,DK-1fd2d279,DK-1fd2d279,Vejrø,Vejrø,exact,DK,DK,same,0.8059,0.8059,1.0,13786.9,11110.3,11110.3,0.0,15.6,25,20,False
+191,1:1,DK-d89032f2,DK-d89032f2,Sejerby,Sejerby,exact,DK,DK,same,0.8037,0.8037,1.0,19444.0,15627.1,15627.1,0.0,7.6,26,22,False
+141,1:1,DK-9a486a2b,DK-9a486a2b,Endelave By,Endelave By,exact,DK,DK,same,0.8003,0.8003,1.0,12045.8,9640.1,9640.1,0.0,13.4,14,12,False
+62,1:1,DK-1a39c910,DK-1a39c910,Kolby Kås,Kolby Kås,exact,DK,DK,same,0.797,0.797,1.0,9646.1,7687.5,7687.5,0.0,6.1,9,6,False
+159,1:1,DK-af626b8c,DK-af626b8c,Troense,Troense,exact,DK,DK,same,0.796,0.796,1.0,10718.2,8531.4,8531.4,0.0,5.6,17,16,False
+309,1:1,SE-cc758e1c,SE-cc758e1c,Ystad,Ystad,exact,SE,SE,same,0.7936,0.7936,1.0,27612.0,21913.0,21913.0,0.0,105.9,33,24,False
+84,1:1,DK-4668b673,DK-4668b673,Lyø By,Lyø By,exact,DK,DK,same,0.7904,0.7904,1.0,19905.1,15733.8,15733.8,0.0,6.1,37,24,False
+97,1:1,DK-5ed10dcc,DK-5ed10dcc,Vejle,Vejle,exact,DK,DK,same,0.7869,0.7869,1.0,21746.8,17112.7,17112.7,0.0,25.5,12,10,False
+143,1:1,DK-9b8b9600,DK-9b8b9600,Spodsbjerg,Spodsbjerg,exact,DK,DK,same,0.7838,0.7838,1.0,21620.5,16947.1,16947.1,0.0,11.1,43,29,False
+201,1:1,DK-e5f1ed99,DK-e5f1ed99,Søby,Søby,exact,DK,DK,same,0.782,0.782,1.0,14730.3,11519.0,11519.0,0.0,18.7,25,17,False
+100,1:1,DK-6306a33e,DK-6306a33e,Aabenraa,Aabenraa,exact,DK,DK,same,0.7814,0.7814,1.0,21923.0,17131.7,17131.7,0.0,15.6,25,16,False
+285,1:1,SE-83ab28ec,SE-83ab28ec,Donsö,Donsö,exact,SE,SE,same,0.778,0.778,1.0,34558.9,26887.3,26887.2,0.0,5.9,26,18,False
+118,1:1,DK-7cc80732,DK-7cc80732,Middelfart,Middelfart,exact,DK,DK,same,0.7737,0.7737,1.0,25810.3,19970.2,19970.2,0.0,13.0,37,28,False
+67,1:1,DK-26169d60,DK-26169d60,Hornbæk,Hornbæk,exact,DK,DK,same,0.7662,0.7662,1.0,21149.8,16204.3,16204.3,0.0,19.7,22,13,False
+71,1:1,DK-30e7e470,DK-30e7e470,Øster Hurup,Øster Hurup,exact,DK,DK,same,0.7555,0.7555,1.0,11182.4,8448.1,8448.1,0.0,40.2,15,10,False
+37,1:1,DE-cdbd38ee,DE-cdbd38ee,Ostseebad Kühlungsborn,Ostseebad Kühlungsborn,exact,DE,DE,same,0.7536,0.7536,1.0,26550.1,20009.4,20009.4,0.0,14.1,33,16,False
+110,1:1,DK-703d7c2b,DK-703d7c2b,Hvide Sande,Hvide Sande,exact,DK,DK,same,0.7471,0.7471,1.0,22358.1,16704.2,16704.2,0.0,36.4,19,12,False
+210,1:1,DK-f9029f1b,DK-f9029f1b,Copenhagen,Copenhagen,exact,DK,DK,same,0.7374,0.7374,1.0,19516.9,14391.4,14391.4,0.0,103.7,21,15,False
+204,1:1,DK-edfed2c4,DK-edfed2c4,Sønderborg,Sønderborg,exact,DK,DK,same,0.7369,0.7369,1.0,56004.3,41271.4,41271.4,0.0,18.4,78,55,False
+172,1:1,DK-c1c8033a,DK-c1c8033a,Rønne,Rønne,exact,DK,DK,same,0.7351,0.7351,1.0,33717.2,24785.0,24785.0,0.0,14.8,58,25,False
+117,1:1,DK-77fd96ed,DK-77fd96ed,Skælskør,Skælskør,exact,DK,DK,same,0.735,0.7619,0.9542,13347.7,10656.9,10169.1,0.0,25.6,17,7,False
+273,1:1,SE-64c414dc,SE-64c414dc,Vässingsö,Vässingsö,exact,SE,SE,same,0.7335,0.7335,1.0,41709.2,30593.3,30593.3,0.0,18.9,32,22,False
+264,1:1,SE-4350b227,SE-4350b227,Käringön,Käringön,exact,SE,SE,same,0.7239,0.7239,1.0,24108.0,17453.0,17452.9,0.0,2.9,32,16,False
+320,1:1,SE-e1f853ab,SE-e1f853ab,Gislövs Läge,Gislövs Läge,exact,SE,SE,same,0.7237,0.7237,1.0,16896.6,12228.0,12228.0,0.0,23.7,10,10,False
+173,1:1,DK-c20318cd,DK-c20318cd,Bønnerup Strand,Bønnerup Strand,exact,DK,DK,same,0.722,0.722,1.0,19475.6,14061.4,14061.4,0.0,29.9,32,15,False
+329,1:1,SE-f7091c86,SE-f7091c86,Krossekärr,Krossekärr,exact,SE,SE,same,0.7206,0.8696,0.8079,19859.3,21377.2,17270.4,0.0,88.1,28,17,False
+229,1:1,NO-7b5e37ce,NO-7b5e37ce,Lillesand,Lillesand,exact,NO,NO,same,0.7162,0.7162,1.0,16286.3,11665.0,11665.0,0.0,18.0,15,7,False
+89,1:1,DK-4d230813,DK-4d230813,Hesnæs,Hesnæs,exact,DK,DK,same,0.7149,0.7149,1.0,10827.1,7739.8,7739.8,0.0,12.7,7,7,False
+274,1:1,SE-682ff250,SE-682ff250,Smögen,Smögen,exact,SE,SE,same,0.7121,0.7121,1.0,22626.8,16113.6,16113.1,0.0,32.7,32,13,False
+156,1:1,DK-a9d5f796,DK-a9d5f796,Skærbæk,Skærbæk,exact,DK,DK,same,0.7072,0.7072,1.0,11464.9,8107.6,8107.6,0.0,21.2,8,8,False
+38,1:1,DE-ce5295c0,DE-ce5295c0,Kappeln,Kappeln,exact,DE,DE,same,0.7025,0.7025,1.0,12355.0,8679.0,8679.0,0.0,76.6,17,10,False
+47,1:1,DK-06d3e7b1,DK-06d3e7b1,Middelfart,Middelfart,exact,DK,DK,same,0.7015,0.7015,1.0,60506.1,42442.3,42442.3,0.0,25.5,53,49,False
+162,1:1,DK-b4aa8cae,DK-b4aa8cae,Havnebyen,Havnebyen,exact,DK,DK,same,0.7014,0.7014,1.0,24443.9,17145.9,17145.9,0.0,7.1,21,19,False
+146,1:1,DK-9cdc2adb,DK-9cdc2adb,Hanstholm,Hanstholm,exact,DK,DK,same,0.7013,0.703,0.9965,37474.4,26437.0,26344.9,0.0,43.1,25,23,False
+163,1:1,DK-b4e67e56,DK-b4e67e56,Nykøbing Mors,Nykøbing Mors,exact,DK,DK,same,0.6975,0.6975,1.0,13193.0,9202.5,9202.5,0.0,44.2,14,10,False
+181,1:1,DK-c95bb7cc,DK-c95bb7cc,Reersø,Reersø,exact,DK,DK,same,0.6965,0.6965,1.0,7012.9,4884.6,4884.6,0.0,37.9,6,4,False
+17,1:1,DE-7ccb1955,DE-7ccb1955,Vitte,Vitte,exact,DE,DE,same,0.6915,0.765,0.878,17128.3,14923.7,13102.9,0.0,84.3,25,13,False
+182,1:1,DK-c9c9208f,DK-c9c9208f,Langør,Langør,exact,DK,DK,same,0.6866,0.6866,1.0,5530.8,3797.7,3797.7,0.0,141.1,6,5,False
+160,1:1,DK-b1dbf262,DK-b1dbf262,Hov,Hov,exact,DK,DK,same,0.6794,0.6794,1.0,38848.0,26392.0,26392.0,0.0,23.4,33,20,False
+278,1:1,SE-6c369a62,SE-6c369a62,Nötsäter,Nordvik,differs,SE,SE,same,0.6781,0.6781,1.0,18718.6,12692.7,12692.7,0.0,54.8,29,16,False
+85,1:1,DK-467f1d9f,DK-467f1d9f,Snaptun,Snaptun,exact,DK,DK,same,0.6734,0.6734,1.0,5743.9,3867.8,3867.8,0.0,15.7,7,5,False
+251,1:1,SE-2b3846d7,SE-2b3846d7,Glommen,Glommen,exact,SE,SE,same,0.6693,0.6693,1.0,8426.1,5639.8,5639.8,0.0,24.8,7,7,False
+149,1:1,DK-a2a3dba7,DK-a2a3dba7,Kerteminde,Kerteminde,exact,DK,DK,same,0.6671,0.67,0.9937,73522.7,49571.1,49257.2,0.0,30.1,88,64,False
+26,1:1,DE-a0616643,DE-a0616643,Rostock,Rostock,exact,DE,DE,same,0.6667,0.6667,1.0,5490.4,3660.2,3660.2,0.0,124.5,7,4,False
+41,1:1,DE-e2ccc910,DE-e2ccc910,Langballigholz,Langballigholz,exact,DE,DE,same,0.6609,0.6609,1.0,5876.1,3883.3,3883.3,0.0,12.7,7,4,False
+91,1:1,DK-5858a104,DK-5858a104,Årøsund,Årøsund,exact,DK,DK,same,0.6525,0.6525,1.0,22305.2,14554.1,14554.1,0.0,4.0,24,20,False
+131,1:1,DK-8c8b0451,DK-8c8b0451,Nexø,Nexø,exact,DK,DK,same,0.6515,0.6515,1.0,23744.4,15469.7,15469.7,0.0,16.9,28,16,False
+179,1:1,DK-c9442993,DK-c9442993,Ålbæk,Ålbæk,exact,DK,DK,same,0.6499,0.6499,1.0,14671.9,9534.7,9534.7,0.0,21.8,20,11,False
+188,1:1,DK-d4d7e082,DK-d4d7e082,Fredericia,Fredericia,exact,DK,DK,same,0.6496,0.6496,1.0,16267.9,10568.2,10568.2,0.0,30.4,22,16,False
+32,1:1,DE-bcceca3f,DE-bcceca3f,Hörnum,Hörnum,exact,DE,DE,same,0.6464,0.6464,1.0,5999.5,3878.1,3878.1,0.0,32.0,10,5,False
+126,1:1,DK-859e318e,DK-859e318e,Lundeborg,Lundeborg,exact,DK,DK,same,0.6455,0.6455,1.0,26006.7,16787.0,16787.0,0.0,13.3,26,20,False
+298,1:1,SE-b6b9bb6f,SE-b6b9bb6f,Malen,Malen,exact,SE,SE,same,0.6433,0.6433,1.0,7652.7,4923.2,4923.2,0.0,17.0,6,4,False
+61,1:1,DK-1a23defe,DK-1a23defe,Strandby,Strandby,exact,DK,DK,same,0.6414,0.6414,1.0,34237.5,21960.1,21960.1,0.0,28.6,29,23,False
+178,1:1,DK-c7e4477a,DK-c7e4477a,Nivå,Nivå,exact,DK,DK,same,0.6355,0.6355,1.0,13295.0,8449.1,8449.1,0.0,24.5,12,7,False
+64,1:1,DK-1f4a7907,DK-1f4a7907,Gedser,Gedser,exact,DK,DK,same,0.632,0.632,1.0,21566.3,13630.7,13630.7,0.0,7.9,32,26,False
+124,1:1,DK-84b2739e,DK-84b2739e,Slipshavn,Slipshavn,exact,DK,DK,same,0.63,0.63,1.0,5597.9,3526.8,3526.8,0.0,55.9,6,4,False
+240,1:1,SE-0a47eb42,SE-0a47eb42,Sollid,Sollid,exact,SE,SE,same,0.6269,0.6269,1.0,5220.8,3273.0,3273.0,0.0,16.8,6,4,False
+215,1:1,DK-ffcb7cf6,DK-ffcb7cf6,Hundested,Hundested,exact,DK,DK,same,0.6269,0.6269,1.0,82800.4,51904.0,51904.0,0.0,49.8,29,24,False
+164,1:1,DK-b6c752ce,DK-b6c752ce,Lohals,Lohals,exact,DK,DK,same,0.6259,0.6259,1.0,25104.5,15713.2,15713.2,0.0,8.9,21,17,False
+154,1:1,DK-a871ec85,DK-a871ec85,Helsingør,Helsingør,exact,DK,DK,same,0.6227,0.6227,1.0,62973.3,39215.7,39215.7,0.0,39.1,43,34,False
+82,1:1,DK-42360edc,DK-42360edc,Løgstør,Løgstør,exact,DK,DK,same,0.6204,0.6204,1.0,21030.2,13047.2,13047.2,0.0,19.5,18,11,False
+81,1:1,DK-40979375,DK-40979375,Copenhagen,Copenhagen,exact,DK,DK,same,0.6193,0.6193,1.0,26303.3,16289.6,16289.6,0.0,57.0,32,23,False
+63,1:1,DK-1ce50a22,DK-1ce50a22,Hellerup,Hellerup,exact,DK,DK,same,0.6188,0.6188,1.0,5695.6,3524.2,3524.2,0.0,27.1,5,4,False
+300,1:1,SE-b9bdd619,SE-b9bdd619,Arvidstorp,Arvidstorp,exact,SE,SE,same,0.6185,0.6185,1.0,7425.7,4593.2,4593.2,0.0,12.8,5,4,False
+247,1:1,SE-1833f86e,SE-1833f86e,Skalhamn,Skalhamn,exact,SE,SE,same,0.6174,0.6174,1.0,5267.9,3252.6,3252.6,0.0,53.9,6,5,False
+158,1:1,DK-af4018f5,DK-af4018f5,Vallensbæk Strand,Vallensbæk Strand,exact,DK,DK,same,0.6163,0.6163,1.0,9201.4,5671.1,5671.1,0.0,17.8,12,6,False
+283,1:1,SE-7e2ec6c7,SE-7e2ec6c7,Barsebäckshamn,Barsebäckshamn,exact,SE,SE,same,0.6161,0.6161,1.0,6334.2,3902.6,3902.6,0.0,23.8,7,7,False
+232,1:1,NO-a33db493,NO-a33db493,Guldsmedenga,Guldsmedenga,exact,NO,NO,same,0.6154,0.6154,1.0,15368.1,9457.4,9457.4,0.0,10.6,21,16,False
+269,1:1,SE-54b259cd,SE-54b259cd,Hasselösund,Hasselösund,exact,SE,SE,same,0.6124,0.6124,1.0,5933.0,3633.2,3633.2,0.0,20.4,7,5,False
+303,1:1,SE-bf53f858,SE-bf53f858,Träslövsläge,Träslövsläge,exact,SE,SE,same,0.609,0.609,1.0,7830.0,4768.2,4768.2,0.0,77.8,9,6,False
+5,1:1,DE-236dd1b4,DE-236dd1b4,Burgtiefe,Burgtiefe,exact,DE,DE,same,0.5994,0.5994,1.0,30402.9,18223.8,18223.8,0.0,39.4,26,15,False
+205,1:1,DK-eeffccaa,DK-eeffccaa,Faaborg,Faaborg,exact,DK,DK,same,0.5914,0.5914,1.0,124146.5,73426.3,73426.3,0.0,37.2,95,67,False
+246,1:1,SE-1782dd8b,SE-1782dd8b,Hunnebostrand,Hunnebostrand,exact,SE,SE,same,0.5853,0.5853,1.0,11671.2,6831.7,6831.7,0.0,76.7,11,6,False
+27,1:1,DE-a0843286,DE-a0843286,Sundhäuser,Sundhäuser,exact,DE,DE,same,0.5845,0.5845,1.0,10076.2,5889.7,5889.7,0.0,51.6,10,6,False
+135,1:1,DK-91958e33,DK-91958e33,Kalvehave,Kalvehave,exact,DK,DK,same,0.572,0.572,1.0,15088.3,8630.3,8630.3,0.0,5.7,18,12,False
+77,1:1,DK-3b698ae3,DK-3b698ae3,Esbjerg,Esbjerg,exact,DK,DK,same,0.5716,0.5716,1.0,21457.2,12264.1,12264.1,0.0,15.7,26,15,False
+123,1:1,DK-832f7100,DK-832f7100,Øerne,Øerne,exact,DK,DK,same,0.5605,0.5605,1.0,30530.3,17113.4,17113.4,0.0,8.4,18,11,False
+180,1:1,DK-c94b8396,DK-c94b8396,Ebeltoft,Ebeltoft,exact,DK,DK,same,0.5604,0.5604,1.0,58896.0,33003.4,33003.4,0.0,118.3,57,33,False
+212,1:1,DK-fc211b17,DK-fc211b17,Bogense,Bogense,exact,DK,DK,same,0.5589,0.5589,1.0,80446.8,44957.9,44957.9,0.0,40.0,58,40,False
+290,1:1,SE-9a20e804,SE-9a20e804,Höganäs,Höganäs,exact,SE,SE,same,0.5579,0.5579,1.0,27785.8,15502.0,15502.0,0.0,19.3,19,13,False
+29,1:1,DE-a2d38a21,DE-a2d38a21,Ostseebad Prerow,Ostseebad Prerow,exact,DE,DE,same,0.5499,0.5499,1.0,9303.3,5115.5,5115.5,0.0,8.9,10,7,False
+243,1:1,SE-12d5c79d,SE-12d5c79d,Hanö,Hanö,exact,SE,SE,same,0.5395,0.5395,1.0,11771.6,6350.4,6350.4,0.0,17.3,10,7,False
+242,1:1,SE-12014125,SE-12014125,Fiskebäck,Fiskebäck,exact,SE,SE,same,0.5335,0.5335,1.0,12677.0,6763.8,6763.8,0.0,52.0,12,6,False
+256,1:1,SE-3a5405ec,SE-3a5405ec,Rörö,Rörö,exact,SE,SE,same,0.5293,0.5293,1.0,21149.2,11194.6,11194.6,0.0,16.6,22,10,False
+199,1:1,DK-e2952a1c,DK-e2952a1c,Stege,Stege,exact,DK,DK,same,0.5285,0.5285,1.0,9457.0,4998.0,4998.0,0.0,42.8,5,4,False
+276,1:1,SE-698ac461,SE-698ac461,Kyrkbacken,Kyrkbacken,exact,SE,SE,same,0.5197,0.5197,1.0,15868.4,8246.6,8246.6,0.0,36.6,11,9,False
+83,1:1,DK-4433040d,DK-4433040d,Oringe,Oringe,exact,DK,DK,same,0.5181,0.5181,1.0,29510.7,15290.2,15290.2,0.0,41.5,24,18,False
+307,1:1,SE-cb7bb0a7,SE-cb7bb0a7,Lerkil,Lerkil,exact,SE,SE,same,0.5126,0.5126,1.0,9693.1,4968.7,4968.7,0.0,20.6,9,4,False
+137,1:1,DK-946d6f0c,DK-946d6f0c,Hirtshals,Hirtshals,exact,DK,DK,same,0.5055,0.5257,0.9291,55032.1,31141.2,28932.5,0.0,29.2,68,35,False
+148,1:1,DK-a1ca38bb,DK-a1ca38bb,Rørvig,Rørvig,exact,DK,DK,same,0.5023,0.5023,1.0,7752.1,3893.8,3893.8,0.0,21.1,5,4,False
+192,1:1,DK-daee4a81,DK-daee4a81,Korsør,Korsør,exact,DK,DK,same,0.5,0.5,1.0,3530.5,1765.2,1765.2,0.0,107.6,10,4,False
+112,1:1,DK-71c4e687,DK-71c4e687,Thurø By,Thurø By,exact,DK,DK,same,0.4969,0.4969,1.0,24184.9,12016.4,12016.4,0.0,50.1,23,17,False
+87,1:1,DK-48f68bff,DK-48f68bff,Branden,Branden,exact,DK,DK,same,0.4957,0.4957,1.0,16166.8,8013.8,8013.8,0.0,12.4,12,6,False
+299,1:1,SE-b8f3d4f5,SE-b8f3d4f5,Grönvik,Grönvik,exact,SE,SE,same,0.4926,0.4926,1.0,18970.1,9344.0,9344.0,0.0,44.1,21,8,False
+136,1:1,DK-94524290,DK-94524290,Nykøbing Sjælland,Nykøbing Sjælland,exact,DK,DK,same,0.4911,0.4911,1.0,25701.8,12622.5,12622.5,0.0,31.2,15,10,False
+217,1:1,NO-1728f7e3,NO-1728f7e3,Lillesand,Lillesand,exact,NO,NO,same,0.4841,0.4841,1.0,29223.2,14147.7,14147.7,0.0,50.6,22,14,False
+322,1:1,SE-e4aaeb43,SE-e4aaeb43,Arvidsvik,Arvidsvik,exact,SE,SE,same,0.4826,0.4826,1.0,43971.3,21222.6,21222.6,0.0,20.6,48,23,False
+99,1:1,DK-62fc9ed2,DK-62fc9ed2,Vindeby,Vindeby,exact,DK,DK,same,0.4824,0.4824,1.0,11726.5,5656.8,5656.8,0.0,9.9,7,7,False
+28,1:1,DE-a1e5f9db,DE-a1e5f9db,Wyk auf Föhr,Wyk auf Föhr,exact,DE,DE,same,0.4805,0.4805,1.0,23288.1,11189.4,11189.4,0.0,37.8,22,11,False
+35,1:1,DE-c5ec43b0,DE-c5ec43b0,Olpenitzdorf,Olpenitzdorf,exact,DE,DE,same,0.4799,0.4799,1.0,17229.0,8268.1,8268.1,0.0,49.2,13,6,False
+224,1:1,NO-47dd7566,NO-47dd7566,Enghaven,Kastellet,differs,NO,NO,same,0.4762,0.4762,1.0,20869.1,9938.2,9938.2,0.0,79.1,19,15,False
+253,1:1,SE-3432f2c7,SE-3432f2c7,Vässingsö,Vässingsö,exact,SE,SE,same,0.474,0.474,1.0,7680.5,3640.8,3640.8,0.0,77.4,15,5,False
+239,1:1,SE-01c81eab,SE-01c81eab,Helsingborg,Helsingborg,exact,SE,SE,same,0.4718,0.4718,1.0,42702.6,20146.5,20146.5,0.0,89.0,31,19,False
+102,1:1,DK-6640f50d,DK-6640f50d,Rødbyhavn,Rødbyhavn,exact,DK,DK,same,0.4717,0.4738,0.9905,24146.7,11551.2,11441.8,0.0,10.4,8,6,False
+106,1:1,DK-69f5f89d,DK-69f5f89d,Tejn,Tejn,exact,DK,DK,same,0.4665,0.4665,1.0,34256.5,15981.1,15981.1,0.0,36.5,19,13,False
+277,1:1,SE-6aedd41d,SE-6aedd41d,Borstahusen,Borstahusen,exact,SE,SE,same,0.4662,0.4662,1.0,8337.1,3886.5,3886.5,0.0,18.8,6,5,False
+107,1:1,DK-6f4f34a6,DK-6f4f34a6,Assens,Assens,exact,DK,DK,same,0.4662,0.4662,1.0,48036.0,22395.9,22395.9,0.0,22.3,38,26,False
+120,1:1,DK-81a808ee,DK-81a808ee,Humlebæk,Humlebæk,exact,DK,DK,same,0.4605,0.4605,1.0,10682.0,4918.6,4918.6,0.0,32.8,5,5,False
+255,1:1,SE-39dfeb5f,SE-39dfeb5f,Simrishamn,Simrishamn,exact,SE,SE,same,0.4528,0.4841,0.875,25804.5,14277.6,12492.6,0.0,15.7,29,23,False
+297,1:1,SE-af3b2105,SE-af3b2105,Fjällbacka,Fjällbacka,exact,SE,SE,same,0.451,0.4846,0.8665,21588.8,12074.2,10462.7,0.0,22.3,30,13,False
+196,1:1,DK-de0dc385,DK-de0dc385,Nyborg,Nyborg,exact,DK,DK,same,0.4503,0.4503,1.0,59139.6,26631.2,26631.1,0.0,19.1,53,26,False
+216,1:1,NO-0bd11f56,NO-0bd11f56,Grimstad,Grimstad,exact,NO,NO,same,0.4434,0.4434,1.0,13166.5,5838.6,5838.6,0.0,82.8,17,10,False
+58,1:1,DK-145c07ba,DK-145c07ba,Aalborg,Aalborg,exact,DK,DK,same,0.4406,0.4406,1.0,9531.1,4199.8,4199.8,0.0,15.6,8,6,False
+280,1:1,SE-7347ed8f,SE-7347ed8f,Helsingborg,Helsingborg,exact,SE,SE,same,0.4286,0.4286,1.0,27278.4,11691.9,11691.9,0.0,70.7,26,15,False
+198,1:1,DK-e259d405,DK-e259d405,Grenå Strand,Grenå Strand,exact,DK,DK,same,0.4206,0.4206,1.0,10125.4,4258.3,4258.3,0.0,59.6,8,5,False
+70,1:1,DK-2f65dea1,DK-2f65dea1,Korsør,Korsør,exact,DK,DK,same,0.4169,0.4169,1.0,26810.7,11178.6,11178.6,0.0,38.3,25,10,False
+108,1:1,DK-6fc0522e,DK-6fc0522e,Hasle,Hasle,exact,DK,DK,same,0.4163,0.4163,1.0,29976.8,12479.3,12479.3,0.0,49.8,16,11,False
+12,1:1,DE-46374e44,DE-46374e44,Kappeln,Kappeln,exact,DE,DE,same,0.411,0.411,1.0,14378.8,5910.2,5910.2,0.0,55.4,12,6,False
+301,1:1,SE-bd5fde24,SE-bd5fde24,Åstol,Åstol,exact,SE,SE,same,0.4094,0.4094,1.0,8923.4,3653.6,3653.6,0.0,17.7,11,8,False
+236,1:1,NO-c4a6efe1,NO-c4a6efe1,Citadelløya,Citadelløya,exact,NO,NO,same,0.4083,0.4083,1.0,36653.9,14964.9,14964.9,0.0,44.2,25,13,False
+155,1:1,DK-a878e9a9,DK-a878e9a9,Rantzausminde,Rantzausminde,exact,DK,DK,same,0.4069,0.4069,1.0,11296.5,4596.9,4596.9,0.0,24.9,7,5,False
+86,1:1,DK-47b777b9,DK-47b777b9,Præstø,Præstø,exact,DK,DK,same,0.4015,0.4015,1.0,9736.3,3908.8,3908.8,0.0,63.1,6,5,False
+11,1:1,DE-44415e70,DE-44415e70,Wendtorf,Wendtorf,exact,DE,DE,same,0.4012,0.4012,1.0,30059.6,12060.8,12060.8,0.0,40.8,32,10,False
+79,1:1,DK-3d6253db,DK-3d6253db,Åstrup,Åstrup,exact,DK,DK,same,0.3971,0.3971,1.0,8633.5,3428.3,3428.3,0.0,63.1,10,4,False
+169,1:1,DK-bea97c30,DK-bea97c30,Bangsbostrand,Bangsbostrand,exact,DK,DK,same,0.3961,0.3961,1.0,16449.2,6515.9,6515.9,0.0,29.9,13,7,False
+20,1:1,DE-94c9fca4,DE-94c9fca4,Maasholm,Maasholm,exact,DE,DE,same,0.392,0.392,1.0,27312.8,10706.1,10706.1,0.0,3.2,15,10,False
+55,1:1,DK-12ac2f3d,DK-12ac2f3d,Skovshoved,Skovshoved,exact,DK,DK,same,0.3878,0.3878,1.0,46901.1,18188.8,18188.8,0.0,27.0,17,15,False
+189,1:1,DK-d50e7eef,DK-d50e7eef,Rendbjerg,Rendbjerg,exact,DK,DK,same,0.3874,0.3874,1.0,22724.3,8803.9,8803.9,0.0,11.9,13,10,False
+310,1:1,SE-cf55c329,SE-cf55c329,Öckerö,Öckerö,exact,SE,SE,same,0.3873,0.3873,1.0,61955.3,23994.2,23994.2,0.0,22.0,49,21,False
+60,1:1,DK-15a018f3,DK-15a018f3,Århus,Århus,exact,DK,DK,same,0.3826,0.3826,1.0,37753.2,14443.7,14443.7,0.0,86.2,31,14,False
+50,1:1,DK-0aaf9197,DK-0aaf9197,Hellerup,Hellerup,exact,DK,DK,same,0.3823,0.3823,1.0,13952.2,5334.0,5334.0,0.0,13.3,5,5,False
+265,1:1,SE-4d664100,SE-4d664100,Björkö,Björkö,exact,SE,SE,same,0.3823,0.3823,1.0,10884.8,4161.3,4161.3,0.0,9.9,12,7,False
+138,1:1,DK-94cbf56f,DK-94cbf56f,Århus,Århus,exact,DK,DK,same,0.3813,0.3813,1.0,18728.2,7141.4,7141.4,0.0,45.3,11,8,False
+177,1:1,DK-c4a2ac44,DK-c4a2ac44,Strynø By,Strynø By,exact,DK,DK,same,0.3772,0.3772,1.0,10338.7,3899.4,3899.4,0.0,16.9,8,8,False
+293,1:1,SE-a723bfb2,SE-a723bfb2,Sandbogen,Sandbogen,exact,SE,SE,same,0.3753,0.3753,1.0,21618.8,8113.0,8113.0,0.0,129.8,17,13,False
+288,1:1,SE-944df56b,SE-944df56b,Malmö,Malmö,exact,SE,SE,same,0.3722,0.3722,1.0,29175.0,10859.0,10859.0,0.0,52.8,20,11,False
+121,1:1,DK-8216c118,DK-8216c118,Rungsted,Rungsted,exact,DK,DK,same,0.3459,0.3459,1.0,41084.5,14209.3,14209.3,0.0,19.2,20,13,False
+315,1:1,SE-d6e34751,SE-d6e34751,Gothenburg,Gothenburg,exact,SE,SE,same,0.3364,0.3364,1.0,13736.1,4620.9,4620.9,0.0,43.6,9,4,False
+207,1:1,DK-f67a7225,DK-f67a7225,Køge,Køge,exact,DK,DK,same,0.3339,0.3339,1.0,14744.4,4922.8,4922.8,0.0,15.2,17,5,False
+15,1:1,DE-5cc52c3d,DE-5cc52c3d,Bonsberg,Bonsberg,exact,DE,DE,same,0.3252,0.3252,1.0,20698.2,6730.3,6730.3,0.0,21.4,16,7,False
+14,1:1,DE-4e7195fc,DE-4e7195fc,Kiel,Kiel,exact,DE,DE,same,0.3151,0.3151,1.0,30203.7,9515.9,9515.9,0.0,36.2,8,8,True
+9,1:1,DE-39517f50,DE-39517f50,Glücksburg,Glücksburg,exact,DE,DE,same,0.3066,0.3066,1.0,16380.9,5022.9,5022.9,0.0,27.0,11,4,False
+127,1:1,DK-8734edc8,DK-8734edc8,Vedbæk,Vedbæk,exact,DK,DK,same,0.3059,0.3059,1.0,26237.4,8025.7,8025.7,0.0,34.3,12,9,False
+80,1:1,DK-3e9a3eb8,DK-3e9a3eb8,Thyborøn,Thyborøn,exact,DK,DK,same,0.2985,0.3759,0.5919,16194.0,10284.1,6086.9,0.0,19.7,13,10,False
+59,1:N,DK-158807b5,DK-158807b5,Copenhagen,Copenhagen,exact,DK,DK,same,0.2914,0.2914,1.0,51664.7,15055.2,15055.2,0.0,161.7,43,22,False
+270,1:1,SE-59f9b032,SE-59f9b032,Lysekil,Lysekil,exact,SE,SE,same,0.2881,0.2881,1.0,16962.1,4886.4,4886.4,0.0,171.0,15,7,False
+19,1:1,DE-8218f54b,DE-8218f54b,Warnemünde,Warnemünde,exact,DE,DE,same,0.2833,0.2833,1.0,12912.6,3657.7,3657.7,0.0,31.4,5,4,False
+30,1:1,DE-aea1c085,DE-aea1c085,Flensburg,Flensburg,exact,DE,DE,same,0.2793,0.2793,1.0,14252.6,3981.1,3981.1,0.0,35.2,12,4,False
+330,1:1,SE-fb6b579e,SE-fb6b579e,Höllviken,Höllviken,exact,SE,SE,same,0.2778,0.2989,0.7972,30748.4,11529.2,9190.7,0.0,17.2,17,16,False
+73,1:1,DK-355e8a15,DK-355e8a15,Frederikshavn,Frederikshavn,exact,DK,DK,same,0.2738,0.2738,1.0,6058.7,1658.8,1658.8,0.0,35.6,8,4,False
+249,1:1,SE-1d8e1534,SE-1d8e1534,Malmö,Malmö,exact,SE,SE,same,0.2676,0.2676,1.0,33769.5,9035.3,9035.3,0.0,88.5,19,13,False
+109,1:1,DK-6fe20465,DK-6fe20465,Kalundborg,Kalundborg,exact,DK,DK,same,0.2649,0.2649,1.0,14746.6,3906.1,3906.1,0.0,174.5,6,5,False
+244,1:1,SE-13b0e3e8,SE-13b0e3e8,Nord-Koster,Nord-Koster,exact,SE,SE,same,0.2397,0.2397,1.0,13306.3,3189.4,3189.4,0.0,270.9,7,4,False
+142,1:1,DK-9aed6fe1,DK-9aed6fe1,Hørup,Hørup,exact,DK,DK,same,0.2392,0.2392,1.0,28073.2,6713.8,6713.8,0.0,14.8,16,7,False
+140,1:1,DK-996a1f1e,DK-996a1f1e,Sanddal,Sanddal,exact,DK,DK,same,0.2355,0.2355,1.0,16327.7,3844.6,3844.6,0.0,76.6,5,4,False
+42,1:1,DE-ef645fe7,DE-ef645fe7,Lütjenbrode,Lütjenbrode,exact,DE,DE,same,0.227,0.227,1.0,7971.9,1809.3,1809.3,0.0,41.8,15,4,False
+257,1:1,SE-3ab42888,SE-3ab42888,Klåvan,Klåvan,exact,SE,SE,same,0.1997,0.1997,1.0,18430.5,3679.7,3679.7,0.0,130.7,10,6,False
+295,1:1,SE-ad7ea5cc,SE-ad7ea5cc,Falsterbovång,Falsterbovång,exact,SE,SE,same,0.1931,0.1931,1.0,20167.9,3894.8,3894.8,0.0,11.6,7,6,False
+111,1:1,DK-7137eee7,DK-7137eee7,Hellerup,Copenhagen,differs,DK,DK,same,0.1796,0.1796,1.0,9815.7,1763.0,1763.0,0.0,14.7,5,4,False
+68,1:1,DK-26b19eb3,DK-26b19eb3,Lynæs,Lynæs,exact,DK,DK,same,0.1742,0.1742,1.0,21932.1,3821.1,3821.1,0.0,35.0,9,7,False
+130,1:1,DK-8c5fbf7f,DK-8c5fbf7f,Aalborg,Aalborg,exact,DK,DK,same,0.1568,0.1568,1.0,33396.8,5236.2,5236.2,0.0,55.1,12,8,False
+318,1:1,SE-dfea7d77,SE-dfea7d77,Gothenburg,Gothenburg,exact,SE,SE,same,0.1532,0.1889,0.448,8811.7,3715.6,1664.4,0.0,88.5,11,5,False
+225,1:1,NO-4a8c4d24,NO-4a8c4d24,Kristiansand,Kristiansand,exact,NO,NO,same,0.14,0.14,1.0,22843.0,3197.1,3197.1,0.0,142.5,19,6,False
+59,1:N,DK-158807b5,DK-2eb2b17b,Copenhagen,Copenhagen,exact,DK,DK,same,0.0341,0.0341,1.0,51667.0,1763.8,1763.8,0.0,679.7,7,5,False

@@ -57,3 +57,6 @@ Thumbs.db
 *.swp
 *.swo
 /data/existing_db/harbours.res8-backup.geojson
+
+
+.agents/

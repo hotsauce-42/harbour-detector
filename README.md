@@ -575,6 +575,65 @@ This writes `data/output/harbours.geojson` so the GUI has something to display i
 
 ---
 
+## Comparing against another harbour database
+
+`scripts/compare_harbour_dbs.py` measures the detector against a harbour database built somewhere else — how much the two agree on, how closely their outlines agree, and what each side holds alone.
+
+```bash
+python3 scripts/compare_harbour_dbs.py --old their_harbours.geojson
+python3 scripts/compare_harbour_dbs.py --old theirs.geojson --out-dir /tmp/compare
+```
+
+It writes `summary.json`, `matched.csv`, `only_in_old.csv`, `only_in_new.csv` and an interactive `compare_map.html` with a layer per category. Local files only — copy from S3 first, since `pathlib.Path` collapses `s3://bucket` to `s3:/bucket`.
+
+**Neither side is treated as the truth.** The other program has its own error rate, so the report says `only_in_old` / `only_in_new` rather than "miss" and "false positive", and keeps the two agreement rates separate instead of folding them into an F1 that would imply a verdict.
+
+### Why it does not match on IoU
+
+Two harbour databases rarely agree on what a harbour *polygon* is. Ours is the trafficked water — a 75 m closing of the cells where ships actually stopped. A port authority's is often the whole administrative port area, land included. Against that convention a **perfect** detection scores an IoU around 0.15, so linking on IoU would report a flawless result as a total disagreement.
+
+Pairs therefore link on any of three grounds that survive a scale mismatch: a real shared area (≥ 2500 m², about one res-11 cell), one shape half inside the other, or a surface gap under 250 m. Centroid distance is reported but never gated on — an old whole-port centroid sits legitimately more than a kilometre from a trafficked-water one.
+
+Before any number is printed the run **calibrates**: it measures the area ratio and both containments across the unambiguous 1:1 pairs, names the regime (`comparable`, `old_is_superset`, `new_is_superset`, `incomparable`) and says which geometry statistic is worth reading. Calibration never moves the link thresholds — tuning gates from the data being scored would hide the disagreement rather than name it.
+
+### Splits and merges
+
+Correspondence is **not** forced one-to-one. Links form a bipartite graph and the answer is its connected components, so a port the pipeline split into three basins is reported as a single `1:3` group rather than one disappearance and three inventions. Groups above `--max-component` (8) are called `tangled` — a chain through an oversized polygon — and are reported but kept out of the medians.
+
+### Why a harbour is in only one database
+
+With the interim files present, every unmatched old harbour is bucketed by how far it got through the pipeline:
+
+| Bucket | Meaning |
+|---|---|
+| `unpaired_nearby` | A pipeline harbour is right there; the two disagree on extent, not on existence |
+| `no_stops` | No extracted stop inside it |
+| `stops_below_cell_floor` | Stops, but no cell survived Phase 2 |
+| `below_cluster_floor` | Cells, but no cluster survived Phase 3 |
+| `detected_not_linked` | A cluster is there and nothing above explains it |
+
+Two honest limits, stated in the report itself: `below_cluster_floor` is reached **by elimination**, because `harbour_clusters.parquet` holds only the clusters that passed `_filter_clusters` — a cluster that formed and was then dropped leaves no trace. And `no_stops` cannot separate "no AIS here at all" from "one vessel, below the Phase-2 `min_unique_mmsi` floor", because the stop file predates that floor and the cell file does not.
+
+A large `no_stops` count means the two databases do not cover the same ground. `--coverage-gate` then restricts the comparison to where vessels actually stopped (res-5 H3 cells around every stop, dilated one ring — a ~25 km tolerance), never to a bounding box: the box around a Danish run reaches the North Sea and inland Poland. It is **off by default**, because dropping rows silently inflates the agreement rate; when any gate is on, the report prints how much it excluded.
+
+### Other flags
+
+| Flag | Effect |
+|---|---|
+| `--old-name-field`, `--old-country-field` | Override property detection. By default fields are picked by highest **fill rate**, not first key present, and the choice is printed |
+| `--exclude-transit` | Drop `transit_like` sites from the new side, as a sensitivity check. The old database has no type field, so lock detection cannot be scored against it — flagged sites are listed for review only |
+| `--countries`, `--bbox` | Manual scope restrictions |
+| `--offline` | Serve Leaflet from `static/vendor/` next to the page (run `scripts/vendor_map_assets.py` first). Basemap tiles still need internet, so offline means geometry on a blank background |
+| `--min-agreement-old/new` | Exit non-zero below a threshold, for CI |
+
+To check the tool itself rather than the detector, point it at two of our own runs — the answer is known, and anything short of near-total correspondence at IoU ≈ 1 means the tool is broken:
+
+```bash
+python3 scripts/compare_harbour_dbs.py --old data/existing_db/harbours.res8-backup.geojson
+```
+
+---
+
 ## Building the Docker images
 
 There are two images, matching the two halves of the pipeline:
@@ -929,12 +988,14 @@ harbour-detector/
 │   └── stop_event.py              # Pydantic model for stop events
 ├── utils/
 │   ├── config.py                  # Shared config loader (YAML + env var overrides)
+│   ├── compare.py                 # Comparing two harbour databases (scripts/compare_harbour_dbs.py)
 │   ├── geo.py                     # Haversine distance, positional variance
 │   ├── overrides.py               # Manual GUI corrections shared by app.py and Phase 5
 │   ├── s3.py                      # S3 credential loading, path helpers, s3fs filesystem factory
 │   └── spark.py                   # SparkSession factory with S3A / MinIO configuration
 ├── tests/                         # Pytest unit tests for all phases
 ├── scripts/
+│   ├── compare_harbour_dbs.py     # Compare the output against another harbour database
 │   └── generate_dummy_harbours.py # GUI test data generator
 ├── data/
 │   ├── raw/                       # Input Parquet files (not committed)

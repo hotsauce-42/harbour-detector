@@ -1,0 +1,53 @@
+{
+  "old_database": "data/existing_db/harbours.geojson",
+  "new_database": "data/output/harbours.geojson",
+  "fields": {
+    "id": "harbour_id",
+    "name": "nearest_city",
+    "country": "country_iso2",
+    "fill": {
+      "id": 1.0,
+      "name": 1.0,
+      "country": 1.0
+    }
+  },
+  "excluded": {},
+  "out_of_coverage": [],
+  "thresholds": {
+    "min_overlap_m2": 2500.0,
+    "min_coverage": 0.5,
+    "max_gap_m": 250.0,
+    "max_component": 8
+  },
+  "calibration": {
+    "regime": "comparable",
+    "headline": "iou",
+    "note": "Both databases draw harbours at the same scale (median area ratio 0.70). IoU is a fair quality number.",
+    "median_area_ratio": 0.7014416946500137,
+    "median_coverage_old": 0.7014416783616267,
+    "median_coverage_new": 0.9999999987172358,
+    "median_iou": 0.6975260189812548,
+    "n_pairs": 255
+  },
+  "scores": {
+    "n_old": 331,
+    "n_new": 257,
+    "matched_old": 256,
+    "matched_new": 257,
+    "only_in_old": 75,
+    "only_in_new": 0,
+    "agreement_old": 0.7734138972809668,
+    "agreement_new": 1.0,
+    "cardinality": {
+      "1:0": 75,
+      "1:1": 255,
+      "1:N": 1
+    },
+    "n_tangled": 0
+  },
+  "only_in_old_reasons": {
+    "below_cluster_floor": 49,
+    "stops_below_cell_floor": 19,
+    "unpaired_nearby": 7
+  }
+}
