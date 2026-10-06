@@ -205,11 +205,21 @@ Vessels waiting for a berth or a pilot stop and stay, so an anchorage clusters l
 It measures against land **polygons**, not a coastline line. A line cannot say which side a site is on, so a river port 80 km up the Elbe would look like the open sea. Against a polygon, a quay and a river port both measure 0 km. The data is OSM's `land-polygons-split-4326.zip` from [osmdata.openstreetmap.de](https://osmdata.openstreetmap.de/data/land-polygons.html). Use the *split* variant: unsplit, Eurasia is one polygon that no region filter can skip. Prepare it once:
 
 ```bash
-python3 scripts/prepare_coastline.py                          # North Sea + Baltic, ~85 s, 1.5 GB RSS
+python3 scripts/prepare_coastline.py                          # North Sea + Baltic: 282k polygons, 262 MB, ~95 s
 python3 scripts/prepare_coastline.py --bbox -5 50 32 72        # min_lon min_lat max_lon max_lat
+python3 scripts/prepare_coastline.py --world --out data/reference/coastline/land_world.parquet
 ```
 
-That streams the 900 MB zip without extracting it (no GDAL) and writes `data/reference/coastline/land.parquet`: 282k polygons, 262 MB. At runtime Phase 4 loads only the polygons around the run's own harbours, which takes about 2 s for the reference run. Like the gazetteer, the file is not baked into the images, so point `coastline_path` at a copy on S3 or a mounted volume.
+That streams the 900 MB zip without extracting it (no GDAL). It buckets the polygons into 10° cells and writes small row groups, one cell each, so memory stays bounded whatever the region. The world is 873k polygons and 79M vertices: it takes 4 min and 720 MB RAM and produces a 1.1 GB file. Like the gazetteer, the file is not baked into the images, so point `coastline_path` at a copy on S3 or a mounted volume.
+
+Phase 4 never loads the whole file. It reads the four bounding-box columns, keeps the tiles within reach of some harbour, and decodes geometry only from the row groups that hold them. Its reach is `max(10 km, 3 × offshore_min_coast_km)`. Distances are exact up to that reach; a site with no land within it gets a null `coast_dist_km` and is flagged. Measured against the world file:
+
+| Harbours | Land tiles loaded | Load | Distances | Peak RAM |
+|---|---|---|---|---|
+| 372 (reference run) | 23k | 1.8 s | 0.3 s | 0.5 GB |
+| 10,000 spread worldwide (simulated) | 664k | 19 s | 28 s | 1.9 GB |
+
+The simulated set is a pessimistic case: its points were drawn per tile, so they cluster in dense archipelagos like Norway and the Canadian Arctic.
 
 Natural Earth's coastline was measured and rejected. At 1:10M it has no small islands, so Christiansø came out 17.6 km "offshore" (from Bornholm) and all six sites beyond 10 km were island harbours. Against OSM land, every harbour in the reference run is within 0.3 km of land.
 

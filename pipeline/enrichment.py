@@ -31,7 +31,7 @@ from shapely.wkt import dumps as to_wkt
 from shapely.wkt import loads as from_wkt
 
 from pipeline.h3_aggregation import VESSEL_COUNTS
-from utils.coastline import Land
+from utils.coastline import Land, search_windows
 from utils.gazetteer import Gazetteer, bbox_around
 from utils.geo import haversine_meters, outline_polygon
 from utils.s3 import (
@@ -484,6 +484,11 @@ def _flag_transit_sites(clusters: pd.DataFrame, config: Phase4Config) -> pd.Data
 # Step 3c: offshore sites (waiting areas, anchorages) masquerading as harbours
 # ---------------------------------------------------------------------------
 
+def offshore_reach_km(threshold_km: float) -> float:
+    """How far from a harbour land is searched for: 10 km, or 3× the threshold."""
+    return max(10.0, 3.0 * threshold_km)
+
+
 def _flag_offshore_sites(
     clusters: pd.DataFrame,
     config: Phase4Config,
@@ -515,14 +520,29 @@ def _flag_offshore_sites(
         logger.info("  offshore detection skipped: phase4.coastline_path is unset")
         return clusters
 
+    geoms = []
+    for outline, cells_wkt, lat, lon in zip(
+        clusters["outline_wkt"], clusters["geometry_wkt"],
+        clusters["centroid_lat"], clusters["centroid_lon"],
+    ):
+        wkt = outline if isinstance(outline, str) else cells_wkt
+        geoms.append(from_wkt(wkt) if isinstance(wkt, str) else Point(lon, lat))
+
+    # How far out distances are measured. Every distance up to here is exact;
+    # a site further out gets a null coast_dist_km and is flagged, which is
+    # right for any threshold below the reach. Kept tight on purpose: with a
+    # 50 km reach, 1,000 harbours spread worldwide pulled in 72% of the
+    # world's 873k land tiles, because a 100 km box in Norway or the Canadian
+    # Arctic holds thousands of islands.
+    reach_km = offshore_reach_km(config.offshore_min_coast_km)
+
     if land is None:
-        # Wide enough that every distance up to the threshold is exact; a site
-        # further out than the margin is certainly over the threshold anyway.
-        margin = max(50.0, 5 * config.offshore_min_coast_km)
+        # Only the land near some harbour is loaded — one window per harbour,
+        # not one box around them all, which for a worldwide run would be the
+        # whole planet (79M vertices).
         land = Land.open(
             config.coastline_path,
-            bbox=bbox_around(clusters["centroid_lat"], clusters["centroid_lon"],
-                             margin_km=margin),
+            windows=search_windows(geoms, reach_km),
             s3_cfg=config.s3_cfg,
         )
         if land is None:
@@ -531,26 +551,27 @@ def _flag_offshore_sites(
     distances: list[float] = []
     flags: list[bool] = []
     n_uncovered = 0
-    for outline, cells_wkt, lat, lon in zip(
-        clusters["outline_wkt"], clusters["geometry_wkt"],
-        clusters["centroid_lat"], clusters["centroid_lon"],
-    ):
-        wkt = outline if isinstance(outline, str) else cells_wkt
-        geom = from_wkt(wkt) if isinstance(wkt, str) else Point(lon, lat)
+    for geom, lat, lon in zip(geoms, clusters["centroid_lat"],
+                              clusters["centroid_lon"]):
         if not land.covers(lat, lon):
             n_uncovered += 1
             distances.append(float("nan"))
             flags.append(False)
             continue
-        dist = land.distance_km(geom, lat, lon)
-        # None: no land anywhere in the loaded region around a site the file
-        # does cover — the open sea, well past any threshold.
+        dist = land.distance_km(geom, lat, lon, max_km=reach_km)
+        # None: no land within reach of a site the file does cover — the open
+        # sea, past the threshold.
         distances.append(float("nan") if dist is None else dist)
         flags.append(config.offshore_min_coast_km > 0
                      and (dist is None or dist > config.offshore_min_coast_km))
 
     clusters["coast_dist_km"] = distances
     clusters["offshore_like"] = flags
+
+    n_beyond = sum(1 for d in distances if d != d) - n_uncovered
+    if n_beyond:
+        logger.info("  %d site(s) have no land within %.0f km — coast_dist_km "
+                    "is null for them", n_beyond, reach_km)
 
     if n_uncovered:
         logger.warning(

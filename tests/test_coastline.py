@@ -4,12 +4,16 @@ import io
 import math
 import struct
 
+import numpy as np
+import pyarrow.parquet as pq
 import pytest
 from shapely.geometry import Point, Polygon, box
 
 from utils.coastline import (
+    BUCKET_DEG,
     Land,
     read_shapefile_polygons,
+    search_windows,
     write_land_parquet,
 )
 from utils.geo import haversine_meters
@@ -101,9 +105,10 @@ def test_land_round_trips_through_parquet_with_its_coverage(tmp_path):
     far = box(100, 1, 101, 2)
     write_land_parquet([ISLAND, far], path, coverage=(-5, 50, 32, 72))
 
-    land = Land.from_parquet(str(path), bbox=(55, 9, 57, 11))
+    windows = search_windows([Point(10.05, 56.05)], margin_km=50)
+    land = Land.from_parquet(str(path), windows=windows)
 
-    assert len(land) == 1                  # the bbox filter dropped `far`
+    assert len(land) == 1                  # the window filter dropped `far`
     assert land.coverage == (-5, 50, 32, 72)
     assert land.covers(56, 10)
     assert not land.covers(1.5, 100.5)
@@ -166,6 +171,16 @@ def test_a_distant_shore_is_found_by_widening_the_search():
     assert got == pytest.approx(30, rel=0.02)
 
 
+def test_the_search_stops_at_max_km():
+    """Phase 4 loads land only that far out, so it must not search further."""
+    lat, lon = LAT + 0.05, LON + 0.1 + 30 / (111.2 * math.cos(math.radians(LAT)))
+    land = Land([ISLAND])
+
+    assert land.distance_km(Point(lon, lat), lat, lon, max_km=10) is None
+    assert land.distance_km(Point(lon, lat), lat, lon, max_km=40) == \
+        pytest.approx(30, rel=0.02)
+
+
 def test_nothing_in_reach_is_none():
     lat, lon = 1.0, 100.0
     assert Land([ISLAND]).distance_km(Point(lon, lat), lat, lon) is None
@@ -184,3 +199,86 @@ def test_the_outline_is_measured_not_the_centroid():
 
     assert Land([ISLAND]).distance_km(harbour, c.y, c.x) == 0.0
     assert Land([ISLAND]).distance_km(c, c.y, c.x) == pytest.approx(2, rel=0.02)
+
+
+# ---------------------------------------------------------------------------
+# World-scale layout: bounded-memory writing, selective reading
+# ---------------------------------------------------------------------------
+
+def _scattered_world(n: int = 600) -> list[Polygon]:
+    """Small squares all over the globe, in a deliberately shuffled order —
+    like the OSM shapefile, whose record order is globally scattered."""
+    rng = np.random.default_rng(7)
+    lons = rng.uniform(-179, 178, n)
+    lats = rng.uniform(-80, 79, n)
+    return [box(x, y, x + 0.5, y + 0.5) for x, y in zip(lons, lats)]
+
+
+def test_spilling_in_small_batches_writes_the_same_polygons(tmp_path):
+    polygons = _scattered_world()
+    one_go, spilled = tmp_path / "a.parquet", tmp_path / "b.parquet"
+
+    write_land_parquet(polygons, one_go)
+    counts = write_land_parquet(iter(polygons), spilled, spill_bytes=2_000)
+
+    assert counts == (len(polygons), 5 * len(polygons))
+    a = {p.wkb for p in Land.from_parquet(str(one_go)).polygons}
+    b = {p.wkb for p in Land.from_parquet(str(spilled)).polygons}
+    assert a == b == {p.wkb for p in polygons}
+
+
+def test_every_row_group_covers_one_cell(tmp_path):
+    """What lets a harbour's land come from a few row groups, not all."""
+    path = tmp_path / "world.parquet"
+    write_land_parquet(_scattered_world(), path, spill_bytes=2_000)
+
+    meta = pq.ParquetFile(str(path)).metadata
+    lon_i = meta.schema.to_arrow_schema().get_field_index("min_lon")
+    lat_i = meta.schema.to_arrow_schema().get_field_index("min_lat")
+    assert meta.num_row_groups > 1
+    for g in range(meta.num_row_groups):
+        lon = meta.row_group(g).column(lon_i).statistics
+        lat = meta.row_group(g).column(lat_i).statistics
+        assert (lon.min + 180) // BUCKET_DEG == (lon.max + 180) // BUCKET_DEG
+        assert (lat.min + 90) // BUCKET_DEG == (lat.max + 90) // BUCKET_DEG
+
+
+def test_only_the_land_near_a_harbour_is_loaded(tmp_path):
+    near = box(10.0, 56.0, 10.1, 56.1)
+    path = tmp_path / "world.parquet"
+    write_land_parquet([*_scattered_world(), near], path)
+
+    harbour = Point(10.2, 56.05)
+    land = Land.from_parquet(str(path),
+                             windows=search_windows([harbour], margin_km=20))
+
+    assert near.wkb in {p.wkb for p in land.polygons}
+    assert len(land) < 5
+    assert land.distance_km(harbour, 56.05, 10.2) == pytest.approx(
+        0.1 * 111.2 * math.cos(math.radians(56.05)), rel=0.01)
+
+
+def test_windows_from_several_harbours_are_all_honoured(tmp_path):
+    a, b = box(10.0, 56.0, 10.1, 56.1), box(-70.0, -33.0, -69.9, -32.9)
+    path = tmp_path / "world.parquet"
+    write_land_parquet([*_scattered_world(), a, b], path)
+
+    land = Land.from_parquet(str(path), windows=search_windows(
+        [Point(10.2, 56.05), Point(-69.8, -32.95)], margin_km=20))
+
+    loaded = {p.wkb for p in land.polygons}
+    assert a.wkb in loaded and b.wkb in loaded
+
+
+def test_no_harbours_loads_nothing(tmp_path):
+    path = tmp_path / "world.parquet"
+    write_land_parquet(_scattered_world(), path)
+
+    assert len(Land.from_parquet(str(path), windows=np.empty((0, 4)))) == 0
+
+
+def test_a_window_grows_more_in_longitude_at_high_latitude():
+    (w,) = search_windows([Point(10.0, 60.0)], margin_km=111.2)
+
+    assert w[3] - w[1] == pytest.approx(2.0, rel=0.01)       # ±1° of latitude
+    assert w[2] - w[0] == pytest.approx(4.0, rel=0.02)       # ±2° at 60°N

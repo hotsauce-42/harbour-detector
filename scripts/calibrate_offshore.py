@@ -48,6 +48,12 @@ def load(path: Path) -> pd.DataFrame:
     columns = ["harbour_id", "nearest_city", "coast_dist_km"]
     out = df[[c for c in columns if c in df.columns]].copy()
     out["coast_dist_km"] = pd.to_numeric(out["coast_dist_km"], errors="coerce")
+    # A null distance on a site Phase 4 flagged means "no land within its
+    # search reach" — far out, not unmeasured.
+    detected = df.get("detected_offshore_like", df.get("offshore_like"))
+    if detected is not None:
+        far = out["coast_dist_km"].isna() & detected.fillna(False).astype(bool)
+        out.loc[far, "coast_dist_km"] = math.inf
     out["label"] = [manual_offshore(row) for _, row in df.iterrows()]
     return out
 

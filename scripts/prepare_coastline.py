@@ -12,15 +12,20 @@ https://osmdata.openstreetmap.de/data/land-polygons.html — the *split* variant
 whose small tiles each carry a tight bounding box. Unsplit, Eurasia is a single
 polygon whose box covers half the planet, so no region filter could skip it.
 
-The zip is ~900 MB holding a 1.3 GB shapefile. This streams it once, keeps the
-polygons that overlap `--bbox`, and writes a compact Parquet file. Nothing is
-extracted to disk and no GDAL is needed.
+The zip is ~900 MB holding a 1.3 GB shapefile — 873k polygons, 79M vertices
+for the world. This streams it once, keeps the polygons that overlap `--bbox`,
+and writes them grouped by area so Phase 4 can read only the parts near its
+harbours. Memory stays bounded (a spill budget plus one 10° cell) whatever the
+region, so a world build works on an ordinary machine. Nothing is extracted to
+disk and no GDAL is needed.
 
 Feeds `phase4.coastline_path`; without the file the offshore flag is skipped.
 
 Usage:
     python3 scripts/prepare_coastline.py
     python3 scripts/prepare_coastline.py --bbox -5 50 32 72
+    python3 scripts/prepare_coastline.py --world \\
+        --out data/reference/coastline/land_world.parquet
     python3 scripts/prepare_coastline.py --source ~/land-polygons-split-4326.zip \\
         --out data/reference/coastline/land.parquet
 """
@@ -51,6 +56,8 @@ def main() -> int:
     parser.add_argument("--bbox", type=float, nargs=4, default=DEFAULT_BBOX,
                         metavar=("MIN_LON", "MIN_LAT", "MAX_LON", "MAX_LAT"),
                         help="region to keep (default: %(default)s)")
+    parser.add_argument("--world", action="store_true",
+                        help="keep everything (same as --bbox -180 -90 180 90)")
     args = parser.parse_args()
 
     if not args.source.exists():
@@ -59,8 +66,9 @@ def main() -> int:
               file=sys.stderr)
         return 1
 
-    bbox = tuple(args.bbox)
+    bbox = (-180.0, -90.0, 180.0, 90.0) if args.world else tuple(args.bbox)
     start = time.time()
+    args.out.parent.mkdir(parents=True, exist_ok=True)
     if args.source.suffix.lower() == ".zip":
         with zipfile.ZipFile(args.source) as zf:
             shp = next((n for n in zf.namelist() if n.lower().endswith(".shp")),
@@ -69,20 +77,20 @@ def main() -> int:
                 print(f"error: no .shp inside {args.source}", file=sys.stderr)
                 return 1
             with zf.open(shp) as stream:
-                polygons = list(read_shapefile_polygons(stream, bbox))
+                n_polygons, n_vertices = write_land_parquet(
+                    read_shapefile_polygons(stream, bbox), args.out, coverage=bbox)
     else:
         with open(args.source, "rb") as stream:
-            polygons = list(read_shapefile_polygons(stream, bbox))
+            n_polygons, n_vertices = write_land_parquet(
+                read_shapefile_polygons(stream, bbox), args.out, coverage=bbox)
 
-    if not polygons:
+    if not n_polygons:
+        args.out.unlink(missing_ok=True)
         print(f"error: no land polygon overlaps bbox {bbox}", file=sys.stderr)
         return 1
 
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    write_land_parquet(polygons, args.out, coverage=bbox)
-    n_vertices = sum(len(p.exterior.coords) for p in polygons)
     size_mb = args.out.stat().st_size / 1e6
-    print(f"{len(polygons):,} polygons, {n_vertices:,} vertices in {bbox} "
+    print(f"{n_polygons:,} polygons, {n_vertices:,} vertices in {bbox} "
           f"→ {args.out} ({size_mb:.1f} MB, {time.time() - start:.0f} s)")
     return 0
 

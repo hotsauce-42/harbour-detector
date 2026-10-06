@@ -380,10 +380,15 @@ def offshore_harbours(features: list[dict]) -> list[int]:
 
 
 def coast_km_text(props: dict) -> str:
-    """Distance to land for display; "—" when Phase 4 had no land polygons."""
+    """
+    Distance to land for display. Null means one of two things, which the
+    detected flag tells apart: no land within Phase 4's search reach (flagged),
+    or no land polygons for this site at all (not flagged).
+    """
     value = props.get("coast_dist_km")
     if value is None:
-        return "—"
+        detected = props.get(DETECTED_OFFSHORE_KEY, props.get("offshore_like"))
+        return "far (beyond search reach)" if detected else "—"
     try:
         return f"{float(value):.2f} km"
     except (TypeError, ValueError):
@@ -953,7 +958,11 @@ def _offshore_panel(feat: dict, paths: list[str]) -> None:
     if is_offshore(props):
         st.markdown(f"**{OFFSHORE_BADGE}**")
 
-    if props.get("coast_dist_km") is None:
+    if props.get("coast_dist_km") is None and detected:
+        # Phase 4 searches a limited reach; past it, the distance is null.
+        st.caption("The pipeline detected **an offshore waiting area** — no "
+                   "land within its search reach (10 km, or 3× the threshold).")
+    elif props.get("coast_dist_km") is None:
         st.caption("The pipeline measured no distance to land for this site "
                    "(phase4.coastline_path was not set or did not cover it).")
     else:

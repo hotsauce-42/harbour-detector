@@ -13,9 +13,15 @@ read as 0 km.
 
 The data is OSM's `land-polygons-split-4326` (osmdata.openstreetmap.de), which
 `scripts/prepare_coastline.py` clips to a region and writes as Parquet — one row
-per polygon, WKB plus its bounding box. Natural Earth was measured and rejected:
-at 1:10M it has no small islands, so Christiansø came out 17.6 km "offshore"
-from Bornholm and every island harbour looked like an anchorage.
+per polygon, WKB plus its bounding box, in small row groups that each cover one
+10°×10° cell. The world is 873k polygons and 79M vertices, so Phase 4 never
+loads the whole file: it reads the four bbox columns, picks the rows near some
+harbour, and decodes geometry only from the row groups holding them. Memory
+scales with the number of harbours, not with the size of the file.
+
+Natural Earth was measured and rejected: at 1:10M it has no small islands, so
+Christiansø came out 17.6 km "offshore" from Bornholm and every island harbour
+looked like an anchorage.
 
 Distances are computed in a local equirectangular projection around each
 harbour, never in degrees: at 56°N a degree of longitude is 0.56× a degree of
@@ -27,8 +33,10 @@ candidates only, which is metric-free and therefore exact.
 import logging
 import math
 import struct
+import tempfile
+from collections import defaultdict
 from pathlib import Path
-from typing import BinaryIO, Iterator
+from typing import BinaryIO, Iterable, Iterator
 
 import numpy as np
 import pyarrow as pa
@@ -62,6 +70,17 @@ COVERAGE_KEY = b"coverage_bbox"
 # projection is off by a couple of percent, which no threshold here cares about.
 FIRST_SEARCH_KM = 5.0
 MAX_SEARCH_KM = 400.0
+
+# Write-side layout. Rows are bucketed into cells of BUCKET_DEG and each row
+# group holds rows of one cell only, so the groups a harbour needs are few and
+# small. The shapefile's own record order is globally scattered — every
+# 5,000-record run spans ~350° of longitude — so without the bucketing every
+# row group would hold something near every harbour.
+BUCKET_DEG = 10.0
+ROW_GROUP_ROWS = 2_000
+# WKB held in memory before it is spilled to the temporary file.
+SPILL_BYTES = 256 * 1024 * 1024
+_BUCKET_COLS = int(360 // BUCKET_DEG)
 
 SHP_MAGIC = 9994
 SHP_POLYGON = 5
@@ -142,27 +161,107 @@ def read_shapefile_polygons(
         )
 
 
+def _bucket(min_lon: float, min_lat: float) -> int:
+    """The BUCKET_DEG cell a polygon belongs to, row-major from the south-west."""
+    row = min(int((min_lat + 90.0) // BUCKET_DEG), int(180 // BUCKET_DEG) - 1)
+    col = min(int((min_lon + 180.0) // BUCKET_DEG), _BUCKET_COLS - 1)
+    return max(row, 0) * _BUCKET_COLS + max(col, 0)
+
+
+_SPILL_SCHEMA = LAND_SCHEMA.append(pa.field("bucket", pa.int32()))
+
+
 def write_land_parquet(
-    polygons: list[Polygon],
+    polygons: Iterable[Polygon],
     path: str | Path,
     coverage: tuple[float, float, float, float] | None = None,
-) -> None:
-    """Write polygons in LAND_SCHEMA, sorted by latitude for row-group pruning."""
-    bounds = shapely.bounds(np.asarray(polygons, dtype=object)).reshape(-1, 4)
-    order = np.argsort(bounds[:, 1], kind="stable")
-    table = pa.table({
-        "wkb": pa.array(shapely.to_wkb(np.asarray(polygons, dtype=object)[order]),
-                        type=pa.binary()),
-        "min_lon": bounds[order, 0],
-        "min_lat": bounds[order, 1],
-        "max_lon": bounds[order, 2],
-        "max_lat": bounds[order, 3],
-    }, schema=LAND_SCHEMA)
+    spill_bytes: int = SPILL_BYTES,
+) -> tuple[int, int]:
+    """
+    Write polygons in LAND_SCHEMA, grouped by area. Returns (polygons, vertices).
+
+    Streams in two passes so a world-sized input never sits in memory at once:
+    polygons are bucketed by cell and spilled to a temporary Parquet file
+    whenever `spill_bytes` of WKB has built up, one row group per bucket; then
+    each bucket is read back in turn, sorted by latitude and written out in
+    ROW_GROUP_ROWS-row groups. Peak memory is the spill budget plus the
+    largest bucket.
+    """
+    path = Path(path)
+    metadata = None
     if coverage is not None:
-        table = table.replace_schema_metadata(
-            {COVERAGE_KEY: ",".join(f"{v:.6f}" for v in coverage).encode()}
-        )
-    pq.write_table(table, str(path), compression="zstd", row_group_size=5_000)
+        metadata = {COVERAGE_KEY: ",".join(f"{v:.6f}" for v in coverage).encode()}
+
+    n_polygons = n_vertices = 0
+    with tempfile.TemporaryDirectory(dir=path.parent) as tmp:
+        spill_path = Path(tmp) / "spill.parquet"
+        buffers: dict[int, list] = defaultdict(list)
+        buffered = 0
+        spill = pq.ParquetWriter(str(spill_path), _SPILL_SCHEMA)
+
+        def flush() -> None:
+            nonlocal buffered
+            for bucket, rows in buffers.items():
+                wkb, x0, y0, x1, y1 = zip(*rows)
+                spill.write_table(pa.table({
+                    "wkb": pa.array(wkb, type=pa.binary()),
+                    "min_lon": x0, "min_lat": y0, "max_lon": x1, "max_lat": y1,
+                    "bucket": pa.array([bucket] * len(rows), type=pa.int32()),
+                }, schema=_SPILL_SCHEMA), row_group_size=len(rows))
+            buffers.clear()
+            buffered = 0
+
+        try:
+            for polygon in polygons:
+                wkb = shapely.to_wkb(polygon)
+                x0, y0, x1, y1 = polygon.bounds
+                buffers[_bucket(x0, y0)].append((wkb, x0, y0, x1, y1))
+                buffered += len(wkb)
+                n_polygons += 1
+                n_vertices += shapely.get_num_coordinates(polygon)
+                if buffered >= spill_bytes:
+                    flush()
+            flush()
+        finally:
+            spill.close()
+
+        # Which spill row groups hold which bucket — one bucket per group by
+        # construction, so the group's statistics name it.
+        spilled = pq.ParquetFile(str(spill_path))
+        bucket_col = _SPILL_SCHEMA.get_field_index("bucket")
+        groups: dict[int, list[int]] = defaultdict(list)
+        for i in range(spilled.metadata.num_row_groups):
+            stats = spilled.metadata.row_group(i).column(bucket_col).statistics
+            groups[int(stats.min)].append(i)
+
+        schema = LAND_SCHEMA.with_metadata(metadata) if metadata else LAND_SCHEMA
+        with pq.ParquetWriter(str(path), schema, compression="zstd") as out:
+            for bucket in sorted(groups):
+                table = spilled.read_row_groups(groups[bucket],
+                                                columns=LAND_SCHEMA.names)
+                table = table.sort_by("min_lat").cast(schema)
+                out.write_table(table, row_group_size=ROW_GROUP_ROWS)
+    return n_polygons, n_vertices
+
+
+def search_windows(geoms, margin_km: float) -> np.ndarray:
+    """
+    One (min_lon, min_lat, max_lon, max_lat) box per geometry, grown by
+    `margin_km` on every side — the land each harbour can possibly need.
+
+    Clamped at the poles and at ±180°: a harbour within `margin_km` of the
+    antimeridian (Fiji, Chukotka) does not see land on the far side of it.
+    """
+    bounds = shapely.bounds(np.asarray(geoms, dtype=object)).reshape(-1, 4)
+    widest = np.maximum(np.abs(bounds[:, 1]), np.abs(bounds[:, 3]))
+    dlat = margin_km / KM_PER_DEG
+    dlon = margin_km / (KM_PER_DEG * np.maximum(np.cos(np.radians(widest)), 1e-3))
+    return np.column_stack([
+        np.maximum(bounds[:, 0] - dlon, -180.0),
+        np.maximum(bounds[:, 1] - dlat, -90.0),
+        np.minimum(bounds[:, 2] + dlon, 180.0),
+        np.minimum(bounds[:, 3] + dlat, 90.0),
+    ])
 
 
 # ---------------------------------------------------------------------------
@@ -209,38 +308,78 @@ class Land:
     def from_parquet(
         cls,
         path: str,
-        bbox: tuple[float, float, float, float] | None = None,
+        windows: np.ndarray | None = None,
         s3_cfg: dict | None = None,
     ) -> "Land":
         """
         Load a file written by `scripts/prepare_coastline.py`.
 
-        `bbox` is (min_lat, min_lon, max_lat, max_lon) — the order
-        `utils.gazetteer.bbox_around` returns — and keeps only polygons whose
-        own box overlaps it.
+        `windows` is an (n, 4) array of (min_lon, min_lat, max_lon, max_lat)
+        boxes — see `search_windows` — and only polygons overlapping one of
+        them are decoded. None loads everything.
+
+        The selection runs on the four bbox columns alone (32 bytes a row, 28 MB
+        for the world), and geometry is then read only from the row groups
+        holding a selected row. A file written before the area grouping still
+        loads correctly, just less selectively.
         """
-        filters = None
-        if bbox is not None:
-            min_lat, min_lon, max_lat, max_lon = bbox
-            filters = [
-                ("max_lat", ">=", min_lat), ("min_lat", "<=", max_lat),
-                ("max_lon", ">=", min_lon), ("min_lon", "<=", max_lon),
-            ]
-        filesystem = get_s3_filesystem(s3_cfg or {}) if is_s3_path(path) else None
-        table = pq.read_table(path, columns=["wkb"], filters=filters,
-                              filesystem=filesystem)
-        meta = pq.read_schema(path, filesystem=filesystem).metadata or {}
-        coverage = None
-        if COVERAGE_KEY in meta:
-            coverage = tuple(float(v) for v in meta[COVERAGE_KEY].decode().split(","))
-        polygons = shapely.from_wkb(table.column("wkb").to_numpy(zero_copy_only=False))
-        return cls(list(polygons), coverage=coverage)
+        if is_s3_path(path):
+            source = get_s3_filesystem(s3_cfg or {}).open(path, "rb")
+        else:
+            source = path
+        pf = pq.ParquetFile(source)
+        try:
+            meta = pf.schema_arrow.metadata or {}
+            coverage = None
+            if COVERAGE_KEY in meta:
+                coverage = tuple(
+                    float(v) for v in meta[COVERAGE_KEY].decode().split(",")
+                )
+
+            n_groups = pf.metadata.num_row_groups
+            if windows is None:
+                wanted = {g: None for g in range(n_groups)}
+            else:
+                wanted = cls._rows_in_windows(pf, np.asarray(windows, dtype=float))
+
+            polygons: list = []
+            for group, rows in wanted.items():
+                column = pf.read_row_group(group, columns=["wkb"]).column("wkb")
+                if rows is not None:
+                    column = column.take(pa.array(rows))
+                polygons.extend(
+                    shapely.from_wkb(column.to_numpy(zero_copy_only=False))
+                )
+        finally:
+            if source is not path:
+                source.close()
+        return cls(polygons, coverage=coverage)
+
+    @staticmethod
+    def _rows_in_windows(pf: pq.ParquetFile, windows: np.ndarray) -> dict:
+        """{row group: row offsets within it} for every polygon in a window."""
+        if not len(windows):
+            return {}
+        b = pf.read(columns=["min_lon", "min_lat", "max_lon", "max_lat"])
+        tiles = shapely.box(*(b.column(c).to_numpy()
+                              for c in ("min_lon", "min_lat", "max_lon", "max_lat")))
+        window_tree = shapely.STRtree(shapely.box(*windows.T))
+        hits = np.unique(window_tree.query(tiles, predicate="intersects")[0])
+
+        sizes = [pf.metadata.row_group(g).num_rows
+                 for g in range(pf.metadata.num_row_groups)]
+        starts = np.concatenate([[0], np.cumsum(sizes)])
+        group_of = np.searchsorted(starts, hits, side="right") - 1
+        return {
+            int(g): (hits[group_of == g] - starts[g]).tolist()
+            for g in np.unique(group_of)
+        }
 
     @classmethod
     def open(
         cls,
         path: str | None,
-        bbox: tuple[float, float, float, float] | None = None,
+        windows: np.ndarray | None = None,
         s3_cfg: dict | None = None,
     ) -> "Land | None":
         """Load `path`, or None when it is unset or missing — the step is off."""
@@ -252,8 +391,9 @@ class Land:
                 "scripts/prepare_coastline.py to build them.", path,
             )
             return None
-        land = cls.from_parquet(str(path), bbox=bbox, s3_cfg=s3_cfg)
-        logger.info("Land polygons: %s (%d in range)", path, len(land))
+        land = cls.from_parquet(str(path), windows=windows, s3_cfg=s3_cfg)
+        logger.info("Land polygons: %s (%d near the run's harbours)",
+                    path, len(land))
         return land
 
     def covers(self, lat: float, lon: float) -> bool:
@@ -263,26 +403,40 @@ class Land:
         min_lon, min_lat, max_lon, max_lat = self.coverage
         return min_lon <= lon <= max_lon and min_lat <= lat <= max_lat
 
-    def distance_km(self, geom, lat0: float, lon0: float) -> float | None:
+    def distance_km(
+        self,
+        geom,
+        lat0: float,
+        lon0: float,
+        max_km: float = MAX_SEARCH_KM,
+    ) -> float | None:
         """
         Distance in km from `geom` (lon/lat degrees) to the nearest land.
 
         0 when the geometry touches or lies on land. The search box starts at
-        FIRST_SEARCH_KM and doubles until land is found; a result is only
-        accepted when it lies inside the box's inscribed radius, because land
-        just outside the box could be nearer than a corner hit inside it.
-        Returns None when nothing is found within MAX_SEARCH_KM.
+        FIRST_SEARCH_KM and doubles up to `max_km` until land is found; a
+        result is only accepted when it lies inside the box's inscribed
+        radius, because land just outside the box could be nearer than a
+        corner hit inside it. Returns None when there is no land within
+        `max_km` — which is exact only if the land loaded covers that far
+        (Phase 4 loads exactly `max_km` around each harbour).
         """
         if geom is None or geom.is_empty or not len(self.polygons):
             return None
+        # Fast path: most harbours touch land at their quay, and an
+        # intersection test needs neither clipping nor projection.
+        if len(self.tree.query(geom, predicate="intersects")):
+            return 0.0
         local_geom = _to_local_km(geom, lat0, lon0)
-        k = max(math.cos(math.radians(lat0)), 1e-6)
         minx, miny, maxx, maxy = geom.bounds
 
-        radius = FIRST_SEARCH_KM
-        while radius <= MAX_SEARCH_KM:
+        radius = min(FIRST_SEARCH_KM, max_km)
+        while True:
             dlat = radius / KM_PER_DEG
-            dlon = radius / (KM_PER_DEG * k)
+            # Degrees of longitude per km at the window's poleward edge, so the
+            # box contains the whole radius rather than falling short of it.
+            widest = min(max(abs(miny - dlat), abs(maxy + dlat)), 89.9)
+            dlon = radius / (KM_PER_DEG * math.cos(math.radians(widest)))
             window = box(minx - dlon, miny - dlat, maxx + dlon, maxy + dlat)
             hits = self.tree.query(window)
             if len(hits):
@@ -297,5 +451,6 @@ class Land:
                     dist = float(shapely.distance(local, local_geom).min())
                     if dist <= radius:
                         return dist
-            radius *= 2
-        return None
+            if radius >= max_km:
+                return None
+            radius = min(radius * 2, max_km)

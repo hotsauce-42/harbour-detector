@@ -187,6 +187,8 @@ phase4:
   # 1 km is a placeholder until calibrated on real data: on the reference run
   # every harbour is within 0.3 km of OSM land.
   # Advisory only — nothing is dropped, and the GUI can overrule it either way.
+  # Land is searched up to max(10 km, 3× the threshold) from each harbour;
+  # further out, coast_dist_km is null and the site is flagged.
   # Empty path skips the step; 0 km keeps coast_dist_km but flags nothing.
   coastline_path: "data/reference/coastline/land.parquet"
   offshore_min_coast_km: 1.0

@@ -1189,6 +1189,9 @@ def test_a_missing_distance_reads_as_a_dash():
     assert app.coast_km_text({}) == "—"
     assert app.coast_km_text({"coast_dist_km": None}) == "—"
     assert app.coast_km_text({"coast_dist_km": 0.0}) == "0.00 km"
+    # Null on a flagged site: beyond Phase 4's search reach, not unmeasured.
+    assert "far" in app.coast_km_text({"coast_dist_km": None,
+                                       "detected_offshore_like": True})
 
 
 def test_saving_an_offshore_verdict_writes_every_file_and_auto_clears_it(tmp_path):
