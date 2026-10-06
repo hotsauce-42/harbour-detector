@@ -8,6 +8,9 @@ For every harbour cluster:
   3. City      — nearest populated place from a GeoNames gazetteer
                  (utils.gazetteer), with a population floor that scales with the
                  harbour's size
+  4. Flags     — advisory verdicts on sites that are not really harbours: ship
+                 locks (traffic shape) and offshore waiting areas (distance to
+                 land, utils.coastline)
 
 Output: data/interim/harbours_enriched.parquet
         (harbour_id is added in Phase 5; this file uses cluster_id as a temp key)
@@ -23,10 +26,12 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pycountry
 import reverse_geocoder as rg
-from shapely.geometry import shape
+from shapely.geometry import Point, shape
 from shapely.wkt import dumps as to_wkt
+from shapely.wkt import loads as from_wkt
 
 from pipeline.h3_aggregation import VESSEL_COUNTS
+from utils.coastline import Land
 from utils.gazetteer import Gazetteer, bbox_around
 from utils.geo import haversine_meters, outline_polygon
 from utils.s3 import (
@@ -57,6 +62,10 @@ ENRICHED_SCHEMA = pa.schema([
     # Does this site behave like somewhere vessels pass through rather than
     # stay? See _flag_transit_sites.
     pa.field("transit_like", pa.bool_()),
+    # Distance from the outline to the nearest land, and whether that makes
+    # the site a waiting area out on the water. See _flag_offshore_sites.
+    pa.field("coast_dist_km", pa.float32()),
+    pa.field("offshore_like", pa.bool_()),
     pa.field("centroid_lat", pa.float64()),
     pa.field("centroid_lon", pa.float64()),
     pa.field("centroid_id_cell", pa.string()),
@@ -115,6 +124,10 @@ class Phase4Config:
     transit_min_commercial_share: float = 0.4
     transit_min_classified_vessels: int = 3
     transit_min_sample: int = 20
+    # Offshore detection — see _flag_offshore_sites. Land polygons from
+    # scripts/prepare_coastline.py; empty path or 0 km disables the step.
+    coastline_path: str = ""
+    offshore_min_coast_km: float = 1.0
     # Outline generation — see utils.geo.outline_polygon
     outline_buffer_meters: float = 75.0
     outline_simplify_meters: float = 0.0
@@ -149,6 +162,8 @@ class Phase4Config:
                 p4.get("transit_min_classified_vessels", 3)
             ),
             transit_min_sample=int(p4.get("transit_min_sample", 20)),
+            coastline_path=p4.get("coastline_path", "") or "",
+            offshore_min_coast_km=float(p4.get("offshore_min_coast_km", 1.0)),
             outline_buffer_meters=p4.get("outline_buffer_meters", 75.0),
             outline_simplify_meters=p4.get("outline_simplify_meters", 0.0),
             outline_fill_holes=p4.get("outline_fill_holes", True),
@@ -466,6 +481,96 @@ def _flag_transit_sites(clusters: pd.DataFrame, config: Phase4Config) -> pd.Data
 
 
 # ---------------------------------------------------------------------------
+# Step 3c: offshore sites (waiting areas, anchorages) masquerading as harbours
+# ---------------------------------------------------------------------------
+
+def _flag_offshore_sites(
+    clusters: pd.DataFrame,
+    config: Phase4Config,
+    land: Land | None = None,
+) -> pd.DataFrame:
+    """
+    Mark sites that lie out on the water rather than at a quay.
+
+    Vessels waiting for a berth or a pilot stop and stay, which is exactly what
+    Phases 1-3 look for, so an anchorage is clustered like any harbour. What
+    gives it away is where it is: a harbour touches land — a quay, a pier, a
+    river bank — and an anchorage does not.
+
+    `coast_dist_km` is the distance from the harbour's *outline* to the
+    nearest land polygon, so a large harbour whose quay touches land is 0 km
+    however far its basin reaches, and a river or canal port, which lies inside
+    the land polygon, is 0 km too. It is written for every harbour, flagged or
+    not, so the threshold can be calibrated from the output
+    (scripts/calibrate_offshore.py).
+
+    Advisory only. Nothing is dropped, and Phase 5 lets an operator overrule
+    the verdict either way. `land` is injectable for tests; otherwise it is
+    loaded from `coastline_path`.
+    """
+    clusters = clusters.copy()
+    clusters["coast_dist_km"] = float("nan")
+    clusters["offshore_like"] = False
+    if not config.coastline_path and land is None:
+        logger.info("  offshore detection skipped: phase4.coastline_path is unset")
+        return clusters
+
+    if land is None:
+        # Wide enough that every distance up to the threshold is exact; a site
+        # further out than the margin is certainly over the threshold anyway.
+        margin = max(50.0, 5 * config.offshore_min_coast_km)
+        land = Land.open(
+            config.coastline_path,
+            bbox=bbox_around(clusters["centroid_lat"], clusters["centroid_lon"],
+                             margin_km=margin),
+            s3_cfg=config.s3_cfg,
+        )
+        if land is None:
+            return clusters
+
+    distances: list[float] = []
+    flags: list[bool] = []
+    n_uncovered = 0
+    for outline, cells_wkt, lat, lon in zip(
+        clusters["outline_wkt"], clusters["geometry_wkt"],
+        clusters["centroid_lat"], clusters["centroid_lon"],
+    ):
+        wkt = outline if isinstance(outline, str) else cells_wkt
+        geom = from_wkt(wkt) if isinstance(wkt, str) else Point(lon, lat)
+        if not land.covers(lat, lon):
+            n_uncovered += 1
+            distances.append(float("nan"))
+            flags.append(False)
+            continue
+        dist = land.distance_km(geom, lat, lon)
+        # None: no land anywhere in the loaded region around a site the file
+        # does cover — the open sea, well past any threshold.
+        distances.append(float("nan") if dist is None else dist)
+        flags.append(config.offshore_min_coast_km > 0
+                     and (dist is None or dist > config.offshore_min_coast_km))
+
+    clusters["coast_dist_km"] = distances
+    clusters["offshore_like"] = flags
+
+    if n_uncovered:
+        logger.warning(
+            "  %d harbour(s) lie outside the region %s was prepared for — left "
+            "unflagged; re-run scripts/prepare_coastline.py with a wider --bbox",
+            n_uncovered, config.coastline_path,
+        )
+    n_flagged = sum(flags)
+    if config.offshore_min_coast_km <= 0:
+        logger.info("  offshore flag disabled (offshore_min_coast_km = 0); "
+                    "coast_dist_km still written")
+    elif n_flagged:
+        logger.info(
+            "  %d site(s) lie more than %.2f km from land — flagged as offshore "
+            "waiting areas", n_flagged, config.offshore_min_coast_km,
+        )
+    return clusters
+
+
+# ---------------------------------------------------------------------------
 # Step 4: write output
 # ---------------------------------------------------------------------------
 
@@ -473,15 +578,15 @@ def _write_enriched(df: pd.DataFrame, config: Phase4Config) -> str:
     out_path = path_join(config.interim_dir, "harbours_enriched.parquet")
 
     # Built from ENRICHED_SCHEMA, so a field added to the schema cannot be
-    # silently left out of the writer. Two columns need help: h3_cells is a
-    # list, and nearest_city_dist_km is float32 where pandas holds float64.
+    # silently left out of the writer. h3_cells is a list and needs help; the
+    # float32 columns are float64 in pandas.
     table = pa.table(
         {
             field.name: (
                 pa.array(df["h3_cells"].tolist(), type=field.type)
                 if field.name == "h3_cells"
                 else pa.array(df[field.name].astype("float32"), type=field.type)
-                if field.name == "nearest_city_dist_km"
+                if field.type == pa.float32()
                 else pa.array(df[field.name], type=field.type)
             )
             for field in ENRICHED_SCHEMA
@@ -521,4 +626,5 @@ def run_phase4(config: Phase4Config) -> str:
     clusters = _add_polygons(clusters, config)
     clusters = _add_geocoding(clusters, config)
     clusters = _flag_transit_sites(clusters, config)
+    clusters = _flag_offshore_sites(clusters, config)
     return _write_enriched(clusters, config)

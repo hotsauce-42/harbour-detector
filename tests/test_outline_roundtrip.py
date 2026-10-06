@@ -48,6 +48,8 @@ def _enriched(tmp_path: Path, rings: int) -> Path:
         "n_recreational":       30,
         "n_tug_pilot":          0,
         "transit_like":         False,
+        "coast_dist_km":        0.0,
+        "offshore_like":        False,
         "centroid_lat":         HAMBURG_LAT,
         "centroid_lon":         HAMBURG_LON,
         "centroid_id_cell":       h3.latlng_to_cell(HAMBURG_LAT, HAMBURG_LON, 8),

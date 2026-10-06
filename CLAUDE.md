@@ -36,6 +36,12 @@ ruff check .
 # Build the nearest-city gazetteer (once; 421 MB download, ~50 s, 1 GB RSS)
 python3 scripts/prepare_gazetteer.py --countries DK SE DE NO PL
 
+# Build the land polygons for the offshore flag (once; needs OSM
+# land-polygons-split-4326.zip in data/reference/coastline/, ~85 s, 1.5 GB RSS)
+python3 scripts/prepare_coastline.py
+# Pick phase4.offshore_min_coast_km from GUI verdicts / confirmed ids
+python3 scripts/calibrate_offshore.py data/output/harbours.parquet
+
 # Compare the output against a harbour database built elsewhere (report + HTML map)
 python3 scripts/compare_harbour_dbs.py --old theirs.geojson --out-dir /tmp/compare
 python3 scripts/compare_harbour_dbs.py --old data/existing_db/harbours.res8-backup.geojson  # self-check
@@ -137,6 +143,8 @@ Only Phase 1 uses Spark; Phases 2–5 are plain pandas/pyarrow/shapely. Phases c
 - A ship lock produces exactly the signature Phases 1-3 look for, so it cannot be excluded earlier — `DE-75202333` is the Kiel-Holtenau lock. `_flag_transit_sites` (Phase 4) marks it from the *shape of its traffic*: short dwell, ~1 visit per vessel, commercial. Two design points that are easy to undo by accident: (a) the dwell limit is absolute because a lock cycle is bounded by physics, but the **visit limits are ratios against the run's median** — raw visit counts grow with the AIS window, so an absolute threshold tuned on one day stops matching on a month; (b) the **commercial-share clause is what carries the precision** — it is what separates Kiel-Holtenau (1.00) and Brunsbüttel (0.50) from the Cuxhaven harbours (0.00 and 0.29) that look identical on dwell. Advisory only: nothing is dropped. Fitted against 2 confirmed locks and 2 confirmed harbours, so it detects *locks*, not non-harbours in general — an anchorage has a different signature. A lock cycling faster than `phase1.min_stop_duration_minutes` never reaches Phase 2 at all.
 
 - A site can be a lock *and* a harbour: Brunsbüttel's lock chamber and its tug berth are 406 m apart, which `connectivity_resolution: 9` correctly clusters as one record. `manual_lock_area_wkt` is a polygon drawn over the lock part; Phase 5's `_apply_manual_lock_area` derives `lock_cells` from it by testing each cell's centre, and a consumer classifies a single stop by testing its cell against that list. It **annotates, it does not split** — the harbour keeps its id, which is the whole reason for the design. Splitting was considered and rejected: a drawn split cannot survive re-clustering, since Phase 3 rebuilds from cells and would merge the halves again.
+
+- The offshore flag (`_flag_offshore_sites`, `utils/coastline.py`) measures the harbour **outline** against OSM **land polygons**, not a coastline line and not the centroid. Lines cannot tell a river port (inside the land) from the open sea. The centroid of a long harbour can be 2 km out while its quay touches land. Natural Earth was measured and rejected: it has no small islands, so all 6 sites beyond 10 km were island harbours (Christiansø 17.6 km from Bornholm). Against OSM every reference-run harbour is within 0.3 km of land, so the reference data holds **no** waiting areas, and `offshore_min_coast_km: 1.0` is a placeholder until it is calibrated on real data with `scripts/calibrate_offshore.py`. `coast_dist_km` is null when the file is missing or a site lies outside the region `prepare_coastline.py` clipped to (its `coverage_bbox` Parquet metadata). Such a site is *not* flagged. "No land in reach" inside the covered region *is* flagged, since that is the open sea. `manual_offshore_like` is tri-state and replaces the detector, exactly like `manual_transit_like`; the two verdicts are independent.
 
 - Effective `transit_like` precedence, most specific statement first: `manual_transit_like` (an explicit whole-site verdict) → a drawn lock area → `detected_transit_like`. Drawing an area implies the site contains a lock; an explicit "Not a lock" still wins. `app.is_transit()` and `_apply_manual_transit` must agree on that order.
 

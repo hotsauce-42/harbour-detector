@@ -38,10 +38,12 @@ from pipeline.id_matching import _jaccard  # noqa: E402
 from utils.geo import haversine_meters  # noqa: E402
 from utils.overrides import (  # noqa: E402
     MANUAL_LOCK_AREA_KEY,
+    MANUAL_OFFSHORE_KEY,
     MANUAL_OUTLINE_KEY,
     MANUAL_TRANSIT_KEY,
     OVERRIDES_KEY,
     manual_lock_area,
+    manual_offshore,
     manual_outline,
     manual_transit,
     normalise_overrides,
@@ -66,6 +68,7 @@ def _has_manual_work(props: dict) -> bool:
         or manual_outline(props)
         or manual_lock_area(props)
         or manual_transit(props) is not None
+        or manual_offshore(props) is not None
     )
 
 
@@ -132,6 +135,10 @@ def carry(old_features: list[dict], new_features: list[dict]) -> tuple[list, lis
         if area:
             dest[MANUAL_LOCK_AREA_KEY] = area
 
+        offshore = manual_offshore(props)
+        if offshore is not None:
+            dest[MANUAL_OFFSHORE_KEY] = offshore
+
         carried = set(fields)
         if drawn:
             carried.add("outline")
@@ -139,6 +146,8 @@ def carry(old_features: list[dict], new_features: list[dict]) -> tuple[list, lis
             carried.add("lock verdict")
         if area:
             carried.add("lock area")
+        if offshore is not None:
+            carried.add("offshore verdict")
         moved.append((props.get("harbour_id"), dest.get("harbour_id"),
                       props.get("nearest_city"), why, sorted(carried)))
     return moved, lost

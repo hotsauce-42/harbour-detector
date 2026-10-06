@@ -145,6 +145,8 @@ On a 331-harbour Danish run this removes 45 of 2 413 cells across 29 harbours, t
 | `transit_min_commercial_share` | `0.4` | Cargo+tanker share required — what separates a canal lock from a marina |
 | `transit_min_classified_vessels` | `3` | Vessels of known type needed before judging at all |
 | `transit_min_sample` | `20` | Below this many harbours a median is meaningless and nothing is flagged |
+| `coastline_path` | `data/reference/coastline/land.parquet` | OSM land polygons from `scripts/prepare_coastline.py`. Empty or missing skips the offshore flag — see [Waiting areas out on the water](#waiting-areas-out-on-the-water) |
+| `offshore_min_coast_km` | `1.0` | Flag sites whose outline is further than this from land as offshore waiting areas. A placeholder until calibrated on real data. `0` keeps `coast_dist_km` but flags nothing |
 | `outline_buffer_meters` | `75` | Closing radius for the harbour outline. Fills gaps narrower than 2× this (~150 m, three res-11 cells) without pushing the boundary more than ~1 buffer past the outermost cell. Raise it to merge terminals that are further apart into a single polygon. |
 | `outline_simplify_meters` | `0` | Vertex thinning tolerance for the outline. Off by default — it is the only step that can pull the boundary inside a trafficked cell (a 10 m tolerance already bites up to ~50 m, a whole res-11 cell). Raise it to shrink the output ~5× if that trade is acceptable. |
 | `outline_fill_holes` | `true` | Drop interior rings, so untrafficked cells inside a harbour leave no holes |
@@ -195,6 +197,32 @@ It is **advisory** — nothing is dropped — and it detects *locks* specificall
 **Part of a site can be a lock.** Brunsbüttel's lock chamber and its tug berth are 406 m apart and cluster as one harbour, so a whole-site flag would call the berth a lock too. Draw a polygon over the lock part instead: the cells inside it come back as `lock_cells` (with `lock_cell_share`), and the harbour **keeps its id** — this marks a sub-area, it does not split the record. A consumer classifies a single stop by testing its H3 cell against `lock_cells`.
 
 In the GUI a flagged site shows a warning banner and an amber outline, the **Show all N flagged as locks** toggle draws every one of them on the map, and the table gains a sortable `Lock?` column. The map's mode selector switches between **View**, **Edit outline** and **Draw lock area**, and the **Site type** tab lets you overrule the detector in either direction. That choice is three-state: *Auto* follows the detector and keeps updating, while *Lock* and *Not a lock* are your decision and survive every future run — stored as `manual_transit_like` and re-applied by Phase 5.
+
+#### Waiting areas out on the water
+
+Vessels waiting for a berth or a pilot stop and stay, so an anchorage clusters like any harbour. What gives it away is where it is: a harbour touches land at its quay, and an anchorage does not. Phase 4 writes `coast_dist_km`, the distance from the harbour **outline** to the nearest land polygon, for every harbour. It sets `offshore_like` when that distance is over `offshore_min_coast_km`.
+
+It measures against land **polygons**, not a coastline line. A line cannot say which side a site is on, so a river port 80 km up the Elbe would look like the open sea. Against a polygon, a quay and a river port both measure 0 km. The data is OSM's `land-polygons-split-4326.zip` from [osmdata.openstreetmap.de](https://osmdata.openstreetmap.de/data/land-polygons.html). Use the *split* variant: unsplit, Eurasia is one polygon that no region filter can skip. Prepare it once:
+
+```bash
+python3 scripts/prepare_coastline.py                          # North Sea + Baltic, ~85 s, 1.5 GB RSS
+python3 scripts/prepare_coastline.py --bbox -5 50 32 72        # min_lon min_lat max_lon max_lat
+```
+
+That streams the 900 MB zip without extracting it (no GDAL) and writes `data/reference/coastline/land.parquet`: 282k polygons, 262 MB. At runtime Phase 4 loads only the polygons around the run's own harbours, which takes about 2 s for the reference run. Like the gazetteer, the file is not baked into the images, so point `coastline_path` at a copy on S3 or a mounted volume.
+
+Natural Earth's coastline was measured and rejected. At 1:10M it has no small islands, so Christiansø came out 17.6 km "offshore" (from Bornholm) and all six sites beyond 10 km were island harbours. Against OSM land, every harbour in the reference run is within 0.3 km of land.
+
+**Calibrating the threshold.** The 1 km default is a placeholder. Every verdict an operator saves in the GUI is a labelled example, and the calibration script turns those into a threshold:
+
+```bash
+python3 scripts/calibrate_offshore.py data/output/harbours.parquet
+python3 scripts/calibrate_offshore.py data/output/harbours.geojson --offshore DE-1234abcd --harbour DK-cdd3fe35
+```
+
+It prints the distances of the confirmed waiting areas and harbours, the range of thresholds that separates them, and what each candidate threshold would flag. Put the chosen value in `settings.yaml`, or set `PHASE4__OFFSHORE_MIN_COAST_KM`.
+
+It is **advisory** — nothing is dropped. In the GUI a flagged site shows a banner and a violet outline. **Show all N flagged offshore** draws every flagged site, and the table gains sortable `Offshore?` and `Land km` columns. The **Site type** tab has a second three-state control (*Auto* / *Offshore waiting area* / *Harbour*), stored as `manual_offshore_like` and re-applied by Phase 5, independently of the lock verdict.
 
 - **A port is named after its city.** The nearest place to a quay is often an unrelated hamlet GeoNames records no inhabitants for — Rostock's Überseehafen is 0.6 km from Petersdorf and 7.5 km from Rostock. When the chosen place has no recorded population, an administrative seat of at least `port_city_min_population` in the *same country* within `port_city_max_km` takes over. A place with a population of its own is never overridden, so Warnemünde keeps its name.
 - **…but only if the harbour is really in that city.** The override is checked against GeoNames administrative division codes: Hellerup is 4.6 km from Copenhagen but in Gentofte kommune, so its harbour stays Hellerup. On the reference run this confirmed 22 of 28 overrides and rejected 6. A gazetteer built before these columns existed still loads — the check simply stands down.

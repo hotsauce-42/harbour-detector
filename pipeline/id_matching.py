@@ -34,14 +34,17 @@ from shapely.wkt import loads as from_wkt
 from utils.geo import haversine_meters, merge_outlines
 from pipeline.h3_aggregation import VESSEL_COUNTS
 from utils.overrides import (
+    DETECTED_OFFSHORE_KEY,
     DETECTED_TRANSIT_KEY,
     MANUAL_LOCK_AREA_KEY,
+    MANUAL_OFFSHORE_KEY,
     MANUAL_TRANSIT_KEY,
     DETECTED_OUTLINE_KEY,
     EDITABLE_FIELDS,
     MANUAL_OUTLINE_KEY,
     OVERRIDES_KEY,
     manual_lock_area,
+    manual_offshore,
     manual_outline,
     manual_transit,
     normalise_overrides,
@@ -80,6 +83,11 @@ OUTPUT_SCHEMA = pa.schema([
     pa.field("n_tug_pilot",            pa.int32()),
     # Effective verdict: an operator's, when they gave one, else Phase 4's.
     pa.field("transit_like",           pa.bool_()),
+    # Distance from the outline to the nearest land (null when Phase 4 had no
+    # land polygons), and the effective offshore verdict — an operator's when
+    # they gave one, else Phase 4's.
+    pa.field("coast_dist_km",          pa.float32()),
+    pa.field("offshore_like",          pa.bool_()),
     pa.field("centroid_lat",           pa.float64()),
     pa.field("centroid_lon",           pa.float64()),
     pa.field("country_iso2",           pa.string()),
@@ -108,6 +116,10 @@ OUTPUT_SCHEMA = pa.schema([
     pa.field("manual_lock_area_wkt",   pa.string()),
     pa.field("lock_cells",             pa.list_(pa.string())),
     pa.field("lock_cell_share",        pa.float64()),
+    # The operator's offshore verdict, tri-state like the lock verdict, and
+    # Phase 4's own, kept so the GUI can show both and revert.
+    pa.field("manual_offshore_like",   pa.bool_()),
+    pa.field("detected_offshore_like", pa.bool_()),
 ])
 
 
@@ -240,6 +252,7 @@ class ManualState:
     outlines: dict[str, str] = field(default_factory=dict)
     transit: dict[str, bool] = field(default_factory=dict)
     lock_areas: dict[str, str] = field(default_factory=dict)
+    offshore: dict[str, bool] = field(default_factory=dict)
 
 
 def cell_list(value) -> list[str]:
@@ -283,6 +296,7 @@ def _build_indexes(
     outlines_by_id: dict[str, str] = {}
     transit_by_id: dict[str, bool] = {}
     lock_areas_by_id: dict[str, str] = {}
+    offshore_by_id: dict[str, bool] = {}
 
     has_cells = "h3_cells" in existing.columns
 
@@ -307,6 +321,10 @@ def _build_indexes(
         area = manual_lock_area(row)
         if area:
             lock_areas_by_id[hid] = area
+
+        offshore = manual_offshore(row)
+        if offshore is not None:
+            offshore_by_id[hid] = offshore
 
         if has_cells:
             cells = cell_list(row["h3_cells"])
@@ -337,10 +355,14 @@ def _build_indexes(
     if lock_areas_by_id:
         logger.info("Existing DB carries drawn lock areas for %d harbours",
                     len(lock_areas_by_id))
+    if offshore_by_id:
+        logger.info("Existing DB carries manual offshore verdicts for %d harbours",
+                    len(offshore_by_id))
 
     return cell_index, centroid_list, ManualState(
         overrides=overrides_by_id, outlines=outlines_by_id,
         transit=transit_by_id, lock_areas=lock_areas_by_id,
+        offshore=offshore_by_id,
     )
 
 
@@ -467,6 +489,7 @@ def _assign_ids(
     manual_outlines: list[Optional[str]] = []
     manual_transits: list[Optional[bool]] = []
     manual_lock_areas: list[Optional[str]] = []
+    manual_offshores: list[Optional[bool]] = []
     # column → {row position → corrected value}, applied after the loop so the
     # matching itself always runs against the freshly geocoded data.
     patches: dict[str, dict[int, object]] = {}
@@ -513,6 +536,7 @@ def _assign_ids(
             manual_outlines.append(manual.outlines.get(existing_id))
             manual_transits.append(manual.transit.get(existing_id))
             manual_lock_areas.append(manual.lock_areas.get(existing_id))
+            manual_offshores.append(manual.offshore.get(existing_id))
             n_matched += 1
 
             corrected = manual.overrides.get(existing_id, {})
@@ -531,6 +555,7 @@ def _assign_ids(
             manual_outlines.append(None)
             manual_transits.append(None)
             manual_lock_areas.append(None)
+            manual_offshores.append(None)
             n_new += 1
 
     logger.info(
@@ -558,6 +583,7 @@ def _assign_ids(
     enriched[MANUAL_OUTLINE_KEY]  = manual_outlines
     enriched[MANUAL_TRANSIT_KEY]  = manual_transits
     enriched[MANUAL_LOCK_AREA_KEY] = manual_lock_areas
+    enriched[MANUAL_OFFSHORE_KEY] = manual_offshores
     return enriched
 
 
@@ -657,6 +683,42 @@ def _apply_manual_transit(df: pd.DataFrame) -> pd.DataFrame:
     if n_applied:
         logger.info("  applied %d manual lock verdict(s) over the detected ones",
                     n_applied)
+    return df
+
+
+def _apply_manual_offshore(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Let an operator's offshore verdict overrule Phase 4's.
+
+    Replaces rather than merges, like the lock verdict: a person saying "this
+    island harbour is not a waiting area" is the whole point of the control.
+    Phase 4's verdict is preserved in `detected_offshore_like`. A null verdict
+    means nobody expressed one, and the detected value stands. There is no
+    drawn-area clause here, unlike the lock verdict — nothing marks *part* of
+    a site as offshore.
+    """
+    df = df.copy()
+    if "offshore_like" not in df.columns:
+        # An enriched file from before the offshore step.
+        df["offshore_like"] = False
+    df[DETECTED_OFFSHORE_KEY] = df["offshore_like"].fillna(False).astype(bool)
+
+    if MANUAL_OFFSHORE_KEY not in df.columns:
+        df[MANUAL_OFFSHORE_KEY] = None
+        return df
+
+    verdicts = [manual_offshore({MANUAL_OFFSHORE_KEY: v})
+                for v in df[MANUAL_OFFSHORE_KEY]]
+    df[MANUAL_OFFSHORE_KEY] = verdicts
+    df["offshore_like"] = [
+        detected if verdict is None else verdict
+        for detected, verdict in zip(df[DETECTED_OFFSHORE_KEY], verdicts)
+    ]
+
+    n_applied = sum(1 for v in verdicts if v is not None)
+    if n_applied:
+        logger.info("  applied %d manual offshore verdict(s) over the detected "
+                    "ones", n_applied)
     return df
 
 
@@ -762,6 +824,16 @@ def _write_parquet(df: pd.DataFrame, out_dir: str, s3_cfg: dict) -> str:
     lock_area_array = pa.array(
         [manual_lock_area(row) for _, row in df.iterrows()], type=pa.string()
     )
+    manual_offshore_array = pa.array(
+        [manual_offshore(row) for _, row in df.iterrows()], type=pa.bool_()
+    )
+    # Null, not NaN, for "no land polygons" — and float32 like the city
+    # distance. Absent altogether in an enriched file from before the step.
+    coast_dist_array = pa.array(
+        df["coast_dist_km"].astype("float32") if "coast_dist_km" in df.columns
+        else [None] * len(df),
+        type=pa.float32(),
+    )
     lock_cells_array = pa.array(
         [cell_list(v) for v in df.get("lock_cells", [[]] * len(df))],
         type=pa.list_(pa.string()),
@@ -778,6 +850,8 @@ def _write_parquet(df: pd.DataFrame, out_dir: str, s3_cfg: dict) -> str:
         MANUAL_TRANSIT_KEY:     manual_transit_array,
         MANUAL_LOCK_AREA_KEY:   lock_area_array,
         "lock_cells":           lock_cells_array,
+        MANUAL_OFFSHORE_KEY:    manual_offshore_array,
+        "coast_dist_km":        coast_dist_array,
     }
     table = pa.table(
         {
@@ -809,6 +883,13 @@ def _optional_wkt(value) -> Optional[str]:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _optional_km(value) -> Optional[float]:
+    """A distance for JSON, or None — never a NaN, which is not valid JSON."""
+    if value is None or pd.isna(value):
+        return None
+    return round(float(value), 3)
 
 
 def _write_geojson(
@@ -864,6 +945,11 @@ def _write_geojson(
                 "lock_cells":             cell_list(row.get("lock_cells")),
                 "lock_cell_share":        round(
                     float(row.get("lock_cell_share") or 0), 3),
+                "coast_dist_km":          _optional_km(row.get("coast_dist_km")),
+                "offshore_like":          bool(row.get("offshore_like", False)),
+                "detected_offshore_like": bool(row.get(
+                    DETECTED_OFFSHORE_KEY, row.get("offshore_like", False))),
+                "manual_offshore_like":   manual_offshore(row),
                 "centroid_lat":           float(row["centroid_lat"]),
                 "centroid_lon":           float(row["centroid_lon"]),
                 "country_iso2":           row["country_iso2"] or "",
@@ -964,6 +1050,7 @@ def run_phase5(config: Phase5Config) -> tuple[str, str, str]:
     result = _apply_manual_outlines(result, fill_holes=config.outline_fill_holes)
     result = _apply_manual_lock_area(result)
     result = _apply_manual_transit(result)
+    result = _apply_manual_offshore(result)
 
     # Write outputs
     ensure_dir(config.output_dir)

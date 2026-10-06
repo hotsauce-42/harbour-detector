@@ -171,6 +171,26 @@ phase4:
   # Below this many harbours a median means nothing, so nothing is flagged.
   transit_min_sample: 20
 
+  # Waiting areas and anchorages look like harbours to Phases 1-3 — vessels
+  # stop and stay — but they lie out on the water. A harbour touches land at
+  # its quay; an anchorage does not. coast_dist_km is the distance from the
+  # harbour outline to the nearest land polygon (0 for anything touching or
+  # on land, river and canal ports included) and is written for every
+  # harbour, so the threshold can be tuned from the output with
+  # scripts/calibrate_offshore.py.
+  #
+  # Land polygons, not a coastline line: build the file once with
+  # `python3 scripts/prepare_coastline.py` from OSM land-polygons-split-4326.
+  # Natural Earth is too coarse — it has no small islands, so every island
+  # harbour (Christiansø, Vejrø) came out 10-17 km "offshore".
+  #
+  # 1 km is a placeholder until calibrated on real data: on the reference run
+  # every harbour is within 0.3 km of OSM land.
+  # Advisory only — nothing is dropped, and the GUI can overrule it either way.
+  # Empty path skips the step; 0 km keeps coast_dist_km but flags nothing.
+  coastline_path: "data/reference/coastline/land.parquet"
+  offshore_min_coast_km: 1.0
+
   # Harbour outline — the H3-cell union morphologically closed (dilated then
   # eroded) so the gaps between berths close and the interior holes left by
   # untrafficked cells disappear. Exported as harbours.geojson; the exact cell

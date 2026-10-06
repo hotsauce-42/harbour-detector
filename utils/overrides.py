@@ -59,6 +59,14 @@ MANUAL_TRANSIT_KEY = "manual_transit_like"
 # what was detected and offer to revert.
 DETECTED_TRANSIT_KEY = "detected_transit_like"
 
+# An operator's verdict on whether a site is an offshore waiting area rather
+# than a harbour. Tri-state for the same reason as MANUAL_TRANSIT_KEY, and
+# replaces Phase 4's verdict the same way. Independent of the lock verdict.
+MANUAL_OFFSHORE_KEY = "manual_offshore_like"
+
+# Phase 4's own offshore verdict, kept so the GUI can show it and revert.
+DETECTED_OFFSHORE_KEY = "detected_offshore_like"
+
 # A lock drawn over *part* of a harbour. A site is often both things at once —
 # Brunsbüttel is a lock and a tug berth 406 m apart, which Phase 3 correctly
 # clusters as one harbour — so the whole-site verdict above cannot describe it.
@@ -154,16 +162,15 @@ def manual_lock_area(row: Mapping[str, Any]) -> Optional[str]:
     return value.strip() or None
 
 
-def manual_transit(row: Mapping[str, Any]) -> Optional[bool]:
+def _tri_state(value: Any) -> Optional[bool]:
     """
-    An operator's stored lock/not-a-lock verdict, or None when they had none.
+    A stored yes/no verdict, or None when there is none.
 
-    Tri-state, so it survives every round-trip that turns a missing value into
-    something else: None, NaN, an empty string from GeoJSON, or the pd.NA of an
-    Arrow-backed column all read back as "no opinion". Strings are accepted
-    because a GeoJSON round-trip can stringify a bool.
+    Survives every round-trip that turns a missing value into something else:
+    None, NaN, an empty string from GeoJSON, or the pd.NA of an Arrow-backed
+    column all read back as "no opinion". Strings are accepted because a
+    GeoJSON round-trip can stringify a bool.
     """
-    value = row.get(MANUAL_TRANSIT_KEY)
     if _is_missing(value):
         return None
     if isinstance(value, str):
@@ -177,6 +184,19 @@ def manual_transit(row: Mapping[str, Any]) -> Optional[bool]:
         return bool(value)
     except (TypeError, ValueError):
         return None
+
+
+def manual_transit(row: Mapping[str, Any]) -> Optional[bool]:
+    """An operator's stored lock/not-a-lock verdict, or None when they had none."""
+    return _tri_state(row.get(MANUAL_TRANSIT_KEY))
+
+
+def manual_offshore(row: Mapping[str, Any]) -> Optional[bool]:
+    """
+    An operator's stored offshore/not-offshore verdict, or None when they had
+    none. Tri-state like manual_transit, and read the same way.
+    """
+    return _tri_state(row.get(MANUAL_OFFSHORE_KEY))
 
 
 def override_values(row: Mapping[str, Any]) -> dict[str, Any]:

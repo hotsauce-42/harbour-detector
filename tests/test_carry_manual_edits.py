@@ -61,6 +61,18 @@ def test_a_lock_verdict_travels_too():
     assert new[0]["properties"]["manual_transit_like"] is True
 
 
+def test_an_offshore_verdict_travels_too():
+    """False included — "checked, it is a harbour" is manual work as well."""
+    cells = ["8b1f05908259fff"]
+    old = [_feature("OLD-1", cells, manual_offshore_like=False)]
+    new = [_feature("NEW-9", cells)]
+
+    moved, _ = carry(old, new)
+
+    assert new[0]["properties"]["manual_offshore_like"] is False
+    assert "offshore verdict" in moved[0][4]
+
+
 def test_harbours_without_manual_work_are_left_alone():
     cells = ["8b1f05908259fff"]
     old = [_feature("OLD-1", cells)]

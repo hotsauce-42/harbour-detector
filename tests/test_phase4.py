@@ -1,15 +1,19 @@
 """Unit tests for Phase 4 enrichment."""
 
+import math
 from pathlib import Path
 
 import h3
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
+from shapely.geometry import box
 from shapely.wkt import loads as from_wkt
 
 from pipeline.cluster_formation import CLUSTER_SCHEMA
 from pipeline.enrichment import (
+    _flag_offshore_sites,
     _flag_transit_sites,
     Phase4Config,
     _add_geocoding,
@@ -19,6 +23,7 @@ from pipeline.enrichment import (
     population_floor,
     run_phase4,
 )
+from utils.coastline import Land, write_land_parquet
 from utils.gazetteer import GAZETTEER_SCHEMA
 
 RES = 11
@@ -672,3 +677,117 @@ def test_transit_detection_can_be_switched_off():
     result = _flag([*_harbours(), lock], transit_max_dwell_minutes=0.0)
 
     assert not result["transit_like"].any()
+
+
+# ---------------------------------------------------------------------------
+# Offshore sites — waiting areas out on the water
+# ---------------------------------------------------------------------------
+
+# A 0.1° square of land with its east shore at OFF_LON + 0.1.
+OFF_LAT, OFF_LON = 56.0, 10.0
+OFF_LAND = box(OFF_LON, OFF_LAT, OFF_LON + 0.1, OFF_LAT + 0.1)
+KM_PER_DEG_LON = 111.2 * math.cos(math.radians(OFF_LAT + 0.05))
+
+
+def _offshore_site(cluster_id: int, km_from_shore: float) -> dict:
+    """A small square site this far east of the island's shore."""
+    lat = OFF_LAT + 0.05
+    west = OFF_LON + 0.1 + km_from_shore / KM_PER_DEG_LON
+    outline = box(west, lat - 0.001, west + 0.002, lat + 0.001)
+    return {
+        "cluster_id":   cluster_id,
+        "outline_wkt":  outline.wkt,
+        "geometry_wkt": outline.wkt,
+        "centroid_lat": lat,
+        "centroid_lon": outline.centroid.x,
+    }
+
+
+def _offshore(rows, land=None, **kwargs) -> pd.DataFrame:
+    config = Phase4Config(interim_dir="", **kwargs)
+    return _flag_offshore_sites(pd.DataFrame(rows), config,
+                                land=land or Land([OFF_LAND]))
+
+
+def test_a_site_far_from_land_is_flagged_offshore():
+    result = _offshore([_offshore_site(0, 0.0), _offshore_site(1, 3.0)],
+                       offshore_min_coast_km=1.0)
+
+    assert list(result["offshore_like"]) == [False, True]
+    assert result.iloc[0]["coast_dist_km"] == 0.0
+    assert result.iloc[1]["coast_dist_km"] == pytest.approx(3.0, rel=0.02)
+
+
+def test_the_threshold_is_configurable():
+    rows = [_offshore_site(0, 3.0)]
+    assert bool(_offshore(rows, offshore_min_coast_km=1.0)
+                .iloc[0]["offshore_like"]) is True
+    assert bool(_offshore(rows, offshore_min_coast_km=10.0)
+                .iloc[0]["offshore_like"]) is False
+
+
+def test_a_zero_threshold_keeps_the_distance_but_flags_nothing():
+    """The distance is still wanted for calibration with the flag off."""
+    result = _offshore([_offshore_site(0, 3.0)], offshore_min_coast_km=0.0)
+
+    assert not result["offshore_like"].any()
+    assert result.iloc[0]["coast_dist_km"] == pytest.approx(3.0, rel=0.02)
+
+
+def test_without_land_polygons_the_step_is_skipped():
+    frame = pd.DataFrame([_offshore_site(0, 3.0)])
+    result = _flag_offshore_sites(frame, Phase4Config(interim_dir=""))
+
+    assert not result["offshore_like"].any()
+    assert result["coast_dist_km"].isna().all()
+
+
+def test_a_missing_land_file_skips_the_step(tmp_path):
+    frame = pd.DataFrame([_offshore_site(0, 3.0)])
+    config = Phase4Config(interim_dir="",
+                          coastline_path=str(tmp_path / "missing.parquet"))
+    result = _flag_offshore_sites(frame, config)
+
+    assert not result["offshore_like"].any()
+
+
+def test_a_site_outside_the_prepared_region_is_not_flagged():
+    """No land in the file there means 'not covered', not 'open sea'."""
+    land = Land([OFF_LAND], coverage=(9.0, 55.0, 11.0, 57.0))
+    singapore = {"cluster_id": 0, "outline_wkt": None, "geometry_wkt": None,
+                 "centroid_lat": SINGAPORE_LAT, "centroid_lon": SINGAPORE_LON}
+    result = _offshore([singapore], land=land)
+
+    assert bool(result.iloc[0]["offshore_like"]) is False
+    assert pd.isna(result.iloc[0]["coast_dist_km"])
+
+
+def test_no_land_in_reach_inside_the_region_is_flagged():
+    """The open sea: the file covers the site and holds no land near it."""
+    land = Land([OFF_LAND], coverage=(-5.0, 50.0, 32.0, 72.0))
+    mid_sea = {"cluster_id": 0, "outline_wkt": None, "geometry_wkt": None,
+               "centroid_lat": 60.0, "centroid_lon": 25.0}
+    result = _offshore([mid_sea], land=land)
+
+    assert bool(result.iloc[0]["offshore_like"]) is True
+    assert pd.isna(result.iloc[0]["coast_dist_km"])
+
+
+def test_run_phase4_writes_the_offshore_columns(tmp_path):
+    rows = [_cluster_row(0, HAMBURG_LAT, HAMBURG_LON)]
+    _write_clusters_parquet(rows, tmp_path / "harbour_clusters.parquet")
+    land_path = tmp_path / "land.parquet"
+    # Land 5 km west of the harbour and nowhere else.
+    k = 111.2 * math.cos(math.radians(HAMBURG_LAT))
+    shore = HAMBURG_LON - 5 / k
+    write_land_parquet([box(shore - 0.1, HAMBURG_LAT - 0.1,
+                            shore, HAMBURG_LAT + 0.1)], land_path,
+                       coverage=(-5.0, 50.0, 32.0, 72.0))
+
+    out = run_phase4(Phase4Config(interim_dir=str(tmp_path),
+                                  coastline_path=str(land_path),
+                                  offshore_min_coast_km=1.0))
+    result = pd.read_parquet(out).iloc[0]
+
+    assert bool(result["offshore_like"]) is True
+    assert result["coast_dist_km"] == pytest.approx(5.0, abs=0.1)

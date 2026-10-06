@@ -27,9 +27,12 @@ from streamlit.testing.v1 import AppTest
 import app
 from utils import map_assets
 from utils.overrides import (
+    DETECTED_OFFSHORE_KEY,
     DETECTED_TRANSIT_KEY,
     MANUAL_LOCK_AREA_KEY,
+    MANUAL_OFFSHORE_KEY,
     manual_lock_area,
+    manual_offshore,
     MANUAL_TRANSIT_KEY,
     manual_transit,
 )
@@ -1124,3 +1127,96 @@ def test_the_map_modes_are_mutually_exclusive(tmp_path):
     labels = [b.label for b in at_outline.button]
     assert "Save outline" in labels
     assert "Save lock area" not in labels
+
+
+# ---------------------------------------------------------------------------
+# Offshore flag: display, the map view, and the manual verdict
+# ---------------------------------------------------------------------------
+
+def _offshore_feature(hid: str, geom, *, detected: bool = False, manual=None,
+                      km: float | None = 3.2) -> dict:
+    feat = _city_feature(hid, geom, "Skagen", "DK")
+    feat["properties"].update({
+        "coast_dist_km":        km,
+        "offshore_like":        detected if manual is None else manual,
+        DETECTED_OFFSHORE_KEY:  detected,
+    })
+    if manual is not None:
+        feat["properties"][MANUAL_OFFSHORE_KEY] = manual
+    return feat
+
+
+def test_an_operator_can_overrule_the_offshore_detector_both_ways():
+    cleared = _offshore_feature("DK-a", box(10.1, 57.7, 10.2, 57.8),
+                                detected=True, manual=False)
+    promoted = _offshore_feature("DK-b", box(10.3, 57.7, 10.4, 57.8),
+                                 detected=False, manual=True)
+    auto = _offshore_feature("DK-c", box(10.5, 57.7, 10.6, 57.8), detected=True)
+
+    assert app.is_offshore(cleared["properties"]) is False
+    assert app.is_offshore(promoted["properties"]) is True
+    assert manual_offshore(auto["properties"]) is None
+    assert app.is_offshore(auto["properties"]) is True
+
+
+def test_the_offshore_and_lock_flags_are_independent():
+    feat = _offshore_feature("DK-a", box(10.1, 57.7, 10.2, 57.8), detected=True)
+    assert app.is_offshore(feat["properties"]) is True
+    assert app.is_transit(feat["properties"]) is False
+
+
+def test_offshore_harbours_finds_every_flagged_site():
+    features = [
+        _offshore_feature("DK-a", box(10.1, 57.7, 10.2, 57.8), detected=True),
+        _city_feature("DE-b", box(9.9, 53.5, 9.94, 53.54), "Hamburg", "DE"),
+        _offshore_feature("DK-c", box(10.3, 57.7, 10.4, 57.8), manual=True),
+    ]
+    assert app.offshore_harbours(features) == [0, 2]
+
+
+def test_the_popup_shows_the_distance_and_the_flag():
+    flagged = _offshore_feature("DK-a", box(10.1, 57.7, 10.2, 57.8),
+                                detected=True)
+    plain = _city_feature("DE-b", box(9.9, 53.5, 9.94, 53.54), "Hamburg", "DE")
+
+    html = app._popup_html(flagged["properties"])
+    assert app.OFFSHORE_BADGE in html
+    assert "3.20 km" in html
+    assert app.OFFSHORE_BADGE not in app._popup_html(plain["properties"])
+
+
+def test_a_missing_distance_reads_as_a_dash():
+    assert app.coast_km_text({}) == "—"
+    assert app.coast_km_text({"coast_dist_km": None}) == "—"
+    assert app.coast_km_text({"coast_dist_km": 0.0}) == "0.00 km"
+
+
+def test_saving_an_offshore_verdict_writes_every_file_and_auto_clears_it(tmp_path):
+    feat = _offshore_feature("DK-a", box(10.1, 57.7, 10.2, 57.8), detected=True)
+    outline, cells = _write_outputs(tmp_path, [feat])
+    paths = [str(outline), str(cells)]
+
+    assert len(app.save_harbour_offshore(paths, "DK-a", False)) == 2
+    for path in (outline, cells):
+        props = json.loads(path.read_text())["features"][0]["properties"]
+        assert props[MANUAL_OFFSHORE_KEY] is False
+        assert props["offshore_like"] is False
+
+    # Back to Auto removes the property rather than storing False.
+    app.save_harbour_offshore(paths, "DK-a", None)
+    props = json.loads(outline.read_text())["features"][0]["properties"]
+    assert MANUAL_OFFSHORE_KEY not in props
+    assert props["offshore_like"] is True
+
+
+def test_the_offshore_verdict_saves_through_the_ui(outputs):
+    """Drives the real radio and button in the Site type tab."""
+    at = _app_on(outputs)
+    assert not at.exception
+
+    at.radio(key="offshore_choice_DE-abcd1234").set_value(app.OFFSHORE_LABEL)
+    at = _submit(at, "Save offshore verdict")
+
+    assert not at.exception
+    for name in ("harbours.geojson", "harbours_cells.geojson"):
+        assert _props(outputs / name)[MANUAL_OFFSHORE_KEY] is True

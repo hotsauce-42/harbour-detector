@@ -19,6 +19,7 @@ from pipeline.enrichment import ENRICHED_SCHEMA
 from pipeline.id_matching import (
     ManualState,
     _apply_manual_lock_area,
+    _apply_manual_offshore,
     _apply_manual_transit,
     _load_existing_db,
     cell_list,
@@ -33,7 +34,9 @@ from pipeline.id_matching import (
     run_phase5,
 )
 from utils.overrides import (
+    DETECTED_OFFSHORE_KEY,
     DETECTED_OUTLINE_KEY,
+    MANUAL_OFFSHORE_KEY,
     MANUAL_LOCK_AREA_KEY,
     DETECTED_TRANSIT_KEY,
     MANUAL_OUTLINE_KEY,
@@ -71,6 +74,8 @@ def _enriched_row(cluster_id: int, lat: float, lon: float) -> dict:
         "n_recreational":       30,
         "n_tug_pilot":          0,
         "transit_like":         False,
+        "coast_dist_km":        0.0,
+        "offshore_like":        False,
         "centroid_lat":         lat,
         "centroid_lon":         lon,
         "centroid_id_cell":       h3.latlng_to_cell(lat, lon, 8),
@@ -1046,3 +1051,83 @@ def test_a_lock_area_survives_a_phase5_run_without_changing_the_id(tmp_path):
     assert len(result["lock_cells"]) >= 1
     assert len(result["lock_cells"]) < len(row["h3_cells"])
     assert bool(result["transit_like"]) is True
+
+
+# ---------------------------------------------------------------------------
+# The operator's offshore verdict, round-tripped
+# ---------------------------------------------------------------------------
+
+def _offshore_run(tmp_path, *, detected: bool, stored,
+                  km: float | None = 3.0) -> tuple[pd.Series, dict]:
+    """Run Phase 5 with a stored offshore verdict over a detected one."""
+    row = _enriched_row(0, HAMBURG_LAT, HAMBURG_LON)
+    outline = _detected_outline(HAMBURG_LAT, HAMBURG_LON)
+    row["geometry_wkt"] = outline
+    row["outline_wkt"] = outline
+    row["offshore_like"] = detected
+    row["coast_dist_km"] = km
+    _write_enriched([row], tmp_path / "harbours_enriched.parquet")
+
+    record = {
+        "harbour_id":   "legacy-hh-001",
+        "centroid_lat": HAMBURG_LAT,
+        "centroid_lon": HAMBURG_LON,
+        "h3_cells":     row["h3_cells"],
+    }
+    if stored is not None:
+        record[MANUAL_OFFSHORE_KEY] = stored
+    db_path = tmp_path / "existing.geojson"
+    _existing_db_geojson(db_path, record)
+
+    parquet_path, geojson_path, _ = run_phase5(
+        _base_config(tmp_path, existing_db=str(db_path)))
+    with open(geojson_path, encoding="utf-8") as f:
+        props = json.load(f)["features"][0]["properties"]
+    return pd.read_parquet(parquet_path).iloc[0], props
+
+
+def test_a_stored_offshore_verdict_clears_an_island_harbour(tmp_path):
+    """
+    The case the control exists for: a real harbour the land data misses,
+    and it has to stay cleared on every future run.
+    """
+    row, props = _offshore_run(tmp_path, detected=True, stored=False)
+
+    assert bool(row["offshore_like"]) is False
+    assert bool(row[DETECTED_OFFSHORE_KEY]) is True
+    assert bool(row[MANUAL_OFFSHORE_KEY]) is False
+    assert props["offshore_like"] is False
+    assert props[MANUAL_OFFSHORE_KEY] is False
+
+
+def test_a_stored_offshore_verdict_promotes_a_missed_waiting_area(tmp_path):
+    row, _ = _offshore_run(tmp_path, detected=False, stored=True)
+
+    assert bool(row["offshore_like"]) is True
+    assert bool(row[DETECTED_OFFSHORE_KEY]) is False
+
+
+def test_without_a_stored_offshore_verdict_the_detector_stands(tmp_path):
+    row, props = _offshore_run(tmp_path, detected=True, stored=None)
+
+    assert bool(row["offshore_like"]) is True
+    assert pd.isna(row[MANUAL_OFFSHORE_KEY])
+    assert props[MANUAL_OFFSHORE_KEY] is None
+    assert props["coast_dist_km"] == pytest.approx(3.0)
+    assert row["coast_dist_km"] == pytest.approx(3.0)
+
+
+def test_a_missing_distance_is_null_not_nan(tmp_path):
+    """NaN is not valid JSON; no land polygons must read back as null."""
+    row, props = _offshore_run(tmp_path, detected=False, stored=None, km=None)
+
+    assert props["coast_dist_km"] is None
+    assert pd.isna(row["coast_dist_km"])
+
+
+def test_an_enriched_file_from_before_the_offshore_step_still_runs(tmp_path):
+    frame = pd.DataFrame([{"harbour_id": "x"}])
+    result = _apply_manual_offshore(frame).iloc[0]
+
+    assert bool(result["offshore_like"]) is False
+    assert bool(result[DETECTED_OFFSHORE_KEY]) is False

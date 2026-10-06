@@ -34,14 +34,17 @@ from streamlit_folium import st_folium
 from utils.geo import clean_polygon, merge_outlines
 from utils.map_assets import VENDOR_URL, is_vendored, use_local_assets
 from utils.overrides import (
+    DETECTED_OFFSHORE_KEY,
     DETECTED_TRANSIT_KEY,
     MANUAL_LOCK_AREA_KEY,
+    MANUAL_OFFSHORE_KEY,
     MANUAL_TRANSIT_KEY,
     DETECTED_OUTLINE_KEY,
     EDITABLE_FIELDS,
     MANUAL_OUTLINE_KEY,
     OVERRIDES_KEY,
     manual_lock_area,
+    manual_offshore,
     manual_outline,
     manual_transit,
     normalise_overrides,
@@ -271,6 +274,31 @@ def save_harbour_transit(
     return [p for p in paths if _edit_harbour_in_file(p, harbour_id, mutate)]
 
 
+def save_harbour_offshore(
+    paths: list[str],
+    harbour_id: str,
+    verdict: bool | None,
+) -> list[str]:
+    """
+    Persist an operator's offshore verdict for one harbour into every GeoJSON.
+
+    Tri-state exactly like `save_harbour_transit`: `verdict=None` removes the
+    property ("no opinion — use the detector"), which is not the same as
+    storing False ("looked at it; it is a harbour, not a waiting area").
+    """
+    def mutate(feat: dict) -> None:
+        props = feat["properties"]
+        if verdict is None:
+            props.pop(MANUAL_OFFSHORE_KEY, None)
+        else:
+            props[MANUAL_OFFSHORE_KEY] = bool(verdict)
+        detected = bool(props.get(DETECTED_OFFSHORE_KEY,
+                                  props.get("offshore_like", False)))
+        props["offshore_like"] = detected if verdict is None else bool(verdict)
+
+    return [p for p in paths if _edit_harbour_in_file(p, harbour_id, mutate)]
+
+
 def save_harbour_lock_area(
     paths: list[str],
     harbour_id: str,
@@ -335,6 +363,31 @@ def is_transit(props: dict) -> bool:
 def transit_harbours(features: list[dict]) -> list[int]:
     """Indices of every harbour currently considered a transit site."""
     return [i for i, f in enumerate(features) if is_transit(f.get("properties", {}))]
+
+
+def is_offshore(props: dict) -> bool:
+    """The effective offshore verdict: an operator's, else the detector's."""
+    verdict = manual_offshore(props)
+    if verdict is not None:
+        return verdict
+    return bool(props.get("offshore_like", False))
+
+
+def offshore_harbours(features: list[dict]) -> list[int]:
+    """Indices of every harbour currently considered an offshore waiting area."""
+    return [i for i, f in enumerate(features)
+            if is_offshore(f.get("properties", {}))]
+
+
+def coast_km_text(props: dict) -> str:
+    """Distance to land for display; "—" when Phase 4 had no land polygons."""
+    value = props.get("coast_dist_km")
+    if value is None:
+        return "—"
+    try:
+        return f"{float(value):.2f} km"
+    except (TypeError, ValueError):
+        return "—"
 
 
 # ---------------------------------------------------------------------------
@@ -547,6 +600,10 @@ def _build_display_df(features: list[dict]) -> pd.DataFrame:
             # Sortable, so every flagged site can be pulled to the top of the
             # table without hunting for it on the map.
             "Lock?":   "⚓" if is_transit(p) else "",
+            "Offshore?": "🌊" if is_offshore(p) else "",
+            # Numeric so it sorts; None (no land polygons) becomes NaN.
+            "Land km": (float(p["coast_dist_km"])
+                        if p.get("coast_dist_km") is not None else None),
         })
     return pd.DataFrame(rows)
 
@@ -574,6 +631,11 @@ CELLS_STYLE = {
 TRANSIT_OUTLINE_STYLE = {"fillColor": "#FB8C00", "color": "#E65100",
                          "weight": 2, "fillOpacity": 0.30}
 TRANSIT_BADGE = "⚓ flagged as a possible lock"
+# Offshore sites in violet, so they stay distinguishable from locks when both
+# review views have been used one after the other.
+OFFSHORE_OUTLINE_STYLE = {"fillColor": "#8E24AA", "color": "#4A148C",
+                          "weight": 2, "fillOpacity": 0.30}
+OFFSHORE_BADGE = "🌊 flagged as an offshore waiting area"
 
 # The map's three modes. Exactly one drawing mode can be live, because
 # st_folium hands back a single `all_drawings` and two Draw controls would
@@ -673,6 +735,10 @@ def _popup_html(props: dict) -> str:
         lines.append(f"Mean dwell: {float(dwell):.0f} min")
     if is_transit(props):
         lines.append(f"<b>{TRANSIT_BADGE}</b>")
+    if props.get("coast_dist_km") is not None:
+        lines.append(f"To land: {coast_km_text(props)}")
+    if is_offshore(props):
+        lines.append(f"<b>{OFFSHORE_BADGE}</b>")
     return "<br/>\n    ".join(lines)
 
 
@@ -851,6 +917,70 @@ def _transit_panel(feat: dict, paths: list[str]) -> None:
             if written:
                 props[MANUAL_TRANSIT_KEY] = verdict
                 props["transit_like"] = detected if verdict is None else verdict
+                st.success(
+                    "Set to Auto — the detector decides again."
+                    if verdict is None
+                    else f"Saved: {choice}."
+                )
+                st.cache_data.clear()
+            else:
+                st.error("Could not write the verdict to any output file.")
+
+
+AUTO_OFFSHORE, OFFSHORE_LABEL, NOT_OFFSHORE_LABEL = (
+    "Auto", "Offshore waiting area", "Harbour")
+
+
+def _offshore_panel(feat: dict, paths: list[str]) -> None:
+    """
+    Let an operator confirm or overrule the offshore flag.
+
+    Tri-state for the same reason as the lock control: "Auto" follows the
+    detector and keeps refreshing, while "Harbour" is a decision that outlasts
+    every run — an island harbour the land data happens to miss stays a
+    harbour once someone has said so.
+    """
+    props = feat.get("properties", {})
+    hid = props.get("harbour_id", "")
+    detected = bool(props.get(DETECTED_OFFSHORE_KEY,
+                              props.get("offshore_like", False)))
+    stored = manual_offshore(props)
+
+    options = [AUTO_OFFSHORE, OFFSHORE_LABEL, NOT_OFFSHORE_LABEL]
+    current = {None: AUTO_OFFSHORE, True: OFFSHORE_LABEL,
+               False: NOT_OFFSHORE_LABEL}[stored]
+
+    if is_offshore(props):
+        st.markdown(f"**{OFFSHORE_BADGE}**")
+
+    if props.get("coast_dist_km") is None:
+        st.caption("The pipeline measured no distance to land for this site "
+                   "(phase4.coastline_path was not set or did not cover it).")
+    else:
+        st.caption(
+            f"The pipeline detected **"
+            f"{'an offshore waiting area' if detected else 'a harbour'}** — "
+            f"its outline is {coast_km_text(props)} from the nearest land."
+        )
+    choice = st.radio(
+        "Is this a harbour or an offshore waiting area?",
+        options, index=options.index(current), horizontal=True,
+        key=f"offshore_choice_{hid}",
+        help="Auto follows the detector and keeps updating. The other two "
+             "are your decision and survive every future run.",
+    )
+    if st.button("Save offshore verdict", key=f"save_offshore_{hid}"):
+        verdict = {AUTO_OFFSHORE: None, OFFSHORE_LABEL: True,
+                   NOT_OFFSHORE_LABEL: False}[choice]
+        # Guarded in the handler, not by disabled=: AppTest runs the click
+        # regardless, and a stray one must not rewrite a verdict.
+        if verdict == stored:
+            st.info("No change to save.")
+        else:
+            written = save_harbour_offshore(paths, hid, verdict)
+            if written:
+                props[MANUAL_OFFSHORE_KEY] = verdict
+                props["offshore_like"] = detected if verdict is None else verdict
                 st.success(
                     "Set to Auto — the detector decides again."
                     if verdict is None
@@ -1078,7 +1208,8 @@ def _after_save(harbour_id: str, note: str | None, message: str) -> None:
     st.rerun()
 
 
-def _map_legend(show: str, siblings: bool = False, locks: bool = False) -> None:
+def _map_legend(show: str, siblings: bool = False, locks: bool = False,
+                offshore: bool = False) -> None:
     """Colour key matching the layers currently drawn."""
     swatch = (
         '<span style="display:inline-block;width:11px;height:11px;'
@@ -1107,6 +1238,12 @@ def _map_legend(show: str, siblings: bool = False, locks: bool = False) -> None:
             swatch.format(fill=TRANSIT_OUTLINE_STYLE["fillColor"],
                           line=TRANSIT_OUTLINE_STYLE["color"])
             + "Flagged as a possible lock"
+        )
+    if offshore:
+        entries.append(
+            swatch.format(fill=OFFSHORE_OUTLINE_STYLE["fillColor"],
+                          line=OFFSHORE_OUTLINE_STYLE["color"])
+            + "Flagged as an offshore waiting area"
         )
     st.markdown(
         '<div style="font-size:0.85em;opacity:0.85;">'
@@ -1178,7 +1315,8 @@ def main() -> None:
 
         st.divider()
         sort_col = st.selectbox(
-            "Sort list by", ["Events", "Vessels", "Cells", "City", "Country"]
+            "Sort list by",
+            ["Events", "Vessels", "Cells", "City", "Country", "Land km"],
         )
         sort_asc = st.checkbox("Ascending", value=False)
 
@@ -1264,17 +1402,23 @@ def main() -> None:
     # ── Metrics row ────────────────────────────────────────────────────────
     vessels = props.get("n_unique_mmsi", props.get("n_unique_mmsi_approx", 0))
     dwell = props.get("mean_dwell_minutes")
-    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
     m1.metric("Events",          f"{props.get('n_events', 0):,}")
     m2.metric("Vessels",         f"{vessels:,}")
     m3.metric("H3 cells",        props.get("n_cells", 0))
     m4.metric("Mean dwell",      "—" if dwell is None else f"{float(dwell):.0f} min")
     m5.metric("Draught changes", props.get("n_draught_changes", 0))
     m6.metric("Country",         props.get("country_iso2", ""))
+    m7.metric("To land",         coast_km_text(props))
 
     if is_transit(props):
         st.warning(
             f"{TRANSIT_BADGE} — vessels pass through rather than stay. "
+            "Open **Site type** below to confirm or overrule."
+        )
+    if is_offshore(props):
+        st.warning(
+            f"{OFFSHORE_BADGE} — {coast_km_text(props)} from the nearest land. "
             "Open **Site type** below to confirm or overrule."
         )
 
@@ -1284,7 +1428,7 @@ def main() -> None:
     # One selector, not two toggles: st_folium reports a single `all_drawings`,
     # so two live Draw controls would leave no way to tell which geometry came
     # back. Making the modes exclusive here makes that impossible.
-    mode_col, city_col, lock_col = st.columns([1.4, 1, 1])
+    mode_col, city_col, lock_col, offshore_col = st.columns([1.4, 1, 1, 1])
     draw_mode = mode_col.segmented_control(
         "Map mode", [MODE_VIEW, MODE_OUTLINE, MODE_LOCK],
         default=MODE_VIEW, key=f"map_mode_{hid}",
@@ -1334,13 +1478,28 @@ def main() -> None:
                  "wherever it is. Click one to select it.",
         )
 
-    # The two context views are mutually exclusive: both hand the map a set of
+    # The review view for the offshore detector, built like the lock one.
+    offshore_idx = [i for i in offshore_harbours(features) if i != global_idx]
+    offshore_view = False
+    if offshore_idx or is_offshore(props):
+        offshore_view = offshore_col.toggle(
+            f"Show all {len(offshore_idx) + (1 if is_offshore(props) else 0)} "
+            "flagged offshore",
+            key="offshore_view",
+            help="Draws every site flagged as an offshore waiting area in "
+                 "violet, wherever it is. Click one to select it.",
+        )
+
+    # The context views are mutually exclusive: each hands the map a set of
     # other harbours to draw, and overlaying them would make a click ambiguous.
-    # Neither applies while drawing, where the map belongs to the drawing.
+    # When several are switched on, the first in this order wins. None applies
+    # while drawing, where the map belongs to the drawing.
     if drawing_lock or editing:
         context_idx, context_style = [], SIBLING_OUTLINE_STYLE
     elif lock_view:
         context_idx, context_style = flagged_idx, TRANSIT_OUTLINE_STYLE
+    elif offshore_view:
+        context_idx, context_style = offshore_idx, OFFSHORE_OUTLINE_STYLE
     elif city_view:
         context_idx, context_style = sibling_idx, SIBLING_OUTLINE_STYLE
     else:
@@ -1395,7 +1554,7 @@ def main() -> None:
             st.rerun()
 
     if editing or drawing_lock:
-        if city_view or lock_view:
+        if city_view or lock_view or offshore_view:
             st.caption(
                 "Click-to-select is paused while drawing, so a stray click "
                 "cannot swap harbours out from under unsaved work."
@@ -1405,8 +1564,10 @@ def main() -> None:
     elif drawing_lock:
         _lock_area_panel(feat, [output_file, cells_file], map_state)
 
-    _map_legend(show_geom, siblings=city_view and not lock_view,
-                locks=lock_view)
+    _map_legend(show_geom,
+                siblings=city_view and not (lock_view or offshore_view),
+                locks=lock_view,
+                offshore=offshore_view and not lock_view)
 
     # ── Panels ─────────────────────────────────────────────────────────────
     # Tabs, not a stack of expanders — but note that st.tabs BUILDS every tab's
@@ -1434,6 +1595,8 @@ def main() -> None:
 
     with type_tab:
         _transit_panel(feat, [output_file, cells_file])
+        st.divider()
+        _offshore_panel(feat, [output_file, cells_file])
 
 
 if __name__ == "__main__":
