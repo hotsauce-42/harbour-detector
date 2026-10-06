@@ -327,6 +327,24 @@ def test_run_phase5_no_existing_db(tmp_path):
     assert {"geometry_wkt", "outline_wkt"} <= set(df.columns)
 
 
+def test_run_phase5_treats_a_missing_existing_db_as_none(tmp_path, caplog):
+    """
+    settings.yaml names data/existing_db/harbours.geojson, which a fresh clone
+    and both container images lack. That is a first run, not a failed one.
+    """
+    rows = [_enriched_row(0, HAMBURG_LAT, HAMBURG_LON)]
+    _write_enriched(rows, tmp_path / "harbours_enriched.parquet")
+
+    config = _base_config(tmp_path, existing_db=str(tmp_path / "absent.geojson"))
+    with caplog.at_level("WARNING", logger="pipeline.id_matching"):
+        parquet_path, _, _ = run_phase5(config)
+
+    df = pd.read_parquet(parquet_path)
+    assert len(df) == 1
+    assert df["matched_existing"].sum() == 0
+    assert "absent.geojson not found" in caplog.text
+
+
 def test_run_phase5_with_existing_db_geojson(tmp_path):
     cells = _cells(HAMBURG_LAT, HAMBURG_LON)
     rows = [_enriched_row(0, HAMBURG_LAT, HAMBURG_LON)]

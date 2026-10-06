@@ -26,12 +26,19 @@ python3 scripts/convert_aisdk_csv.py <zip> --limit-rows 2000000   # quick smoke 
 
 # Tests (self-contained, no AIS files needed)
 pytest
+# test_phase1.py's 8 Spark tests error with "No module named 'pandas'" unless the
+# worker Python is the venv one — the JVM spawns it from PATH, where pandas isn't:
+PYSPARK_PYTHON=~/harbour-venv/bin/python3 pytest    # 8 errors -> 20 passed
 
 # Lint (line-length 88, E/F/W rules — config in ruff.toml)
 ruff check .
 
 # Build the nearest-city gazetteer (once; 421 MB download, ~50 s, 1 GB RSS)
 python3 scripts/prepare_gazetteer.py --countries DK SE DE NO PL
+
+# Compare the output against a harbour database built elsewhere (report + HTML map)
+python3 scripts/compare_harbour_dbs.py --old theirs.geojson --out-dir /tmp/compare
+python3 scripts/compare_harbour_dbs.py --old data/existing_db/harbours.res8-backup.geojson  # self-check
 
 # Streamlit GUI
 streamlit run app.py
@@ -87,6 +94,8 @@ Only Phase 1 uses Spark; Phases 2–5 are plain pandas/pyarrow/shapely. Phases c
 
 - `pathlib.Path` collapses `s3://bucket` → `s3:/bucket`. Never use `Path()` for S3 paths. Use `utils.s3.path_join()` for all path joins that may touch S3 URIs.
 
+- `utils/*` must not import `pipeline/*` — the dependency runs one way only (six pipeline modules import utils; nothing goes back). When a utils module needs pipeline logic, inject it: `utils.compare.components(..., find_components=…)` takes `pipeline.cluster_formation._connected_components` from the caller rather than importing it.
+
 - Config resolution order (highest wins): env vars → `.env` file → `config/settings.yaml`. Any YAML key is overridable via `SECTION__KEY` env vars (e.g. `PHASE3__CLUSTER_RING_SIZE=5`, `S3__ENDPOINT_URL=http://minio:9000`). Legacy flat vars `RAW_GLOB`, `INTERIM_DIR`, `OUTPUT_DIR`, `EXISTING_DB` also still work. S3 credentials use the standard AWS env vars (`AWS_ACCESS_KEY_ID` etc.).
 
 - No geopandas, no GDAL. Geometry is shapely only and GeoJSON is written with `json.dumps` + `shapely.geometry.mapping`, so neither image installs `libgdal-dev` and the enrichment image installs no OS packages at all. Don't reach for `gpd.read_file`/`to_file` — adding geopandas back drags in fiona and the GDAL system library.
@@ -108,6 +117,10 @@ Only Phase 1 uses Spark; Phases 2–5 are plain pandas/pyarrow/shapely. Phases c
 - `country_iso2` comes from the gazetteer's **nearest place at floor 0** — not from the population-floored city, since a floor can select a town tens of km away that is across a border while the village beside the quay is not. `reverse_geocoder` remains the fallback when no place is within `max_city_dist_km`, which is what keeps a regionally-built gazetteer safe; Phase 4 logs a warning naming the count. This was forbidden until 2026-09-05 because `make_harbour_id()` is `{country_iso2}-{uuid5(centroid_h3_r8)[:8]}` — the country is *inside* the ID, so a country change re-IDs any harbour Phase 5 does not match against the existing DB. It was measured before switching: 1 country changed of 328 (a Koster-archipelago harbour rg placed in Norway from 14.8 km away) and **0 IDs**, because 255 of 328 matched the existing DB and no *unmatched* harbour changed country. That zero is a property of that dataset, not a guarantee — re-measure before assuming it elsewhere.
 
 - `reverse_geocoder` is wrong in two ways that `utils/gazetteer.py` exists to fix. Its k-d tree is built on raw (lat, lon) **degrees**, so it minimises Euclidean distance in degree space — at 56°N a degree of longitude is 0.56× a degree of latitude, so places east/west are penalised ~1.8× and the "nearest" city often is not (38 of 331 harbours on a Danish run). It also bundles cities1000 (population > 1000), so no village is in it at all (52 of 331 harbours were >10 km from their city, worst 51 km). The library ships a `geodetic_in_ecef()` that would fix the first — but nothing calls it, and it passes degrees where radians belong.
+
+- `shapely.STRtree.query_nearest` has that same degree-space bug. Use STRtree for envelope candidate generation only (metric-free, so exact) and compute the real distances afterwards with `haversine_meters`.
+
+- NFKD does **not** decompose `ø`, `æ`, `å`, `ß` — they are letters, not accented vowels. Normalising a name by NFKD-then-strip-non-ASCII turns "København" into "k benhavn" and the city stops matching itself. Transliterate them explicitly first (`utils.compare.TRANSLITERATE`). Strip port words (`havn`, `hafen`, `hamn`) as whole tokens only, never as suffixes: Frederikshavn and København are city names, not compounds.
 
 - GeoNames feature class `P` is not all settlements, and Phase 4's city depends on filtering it in two stages (`utils/gazetteer.py`). Stage one, `is_settlement`, is row-at-a-time and runs in both `prepare_gazetteer.py` and `drop_non_settlements` on load, so a file built before the rule existed is corrected without a 421 MB re-download: it drops `PPLQ`/`PPLW`/`PPLH`/`PPLCH` (gone) and any `PPLX` with no population — a district record positioned at the district, which for a waterfront district beats its own town centre on distance and names the harbour "Altstadt" or "Holmen" instead of Heiligenhafen or Copenhagen. Stage two, `drop_overshadowed_districts`, cannot be done row-at-a-time so it is load-only: a surviving district is kept only if no more populous place lies within `DISTRICT_ISOLATION_KM` (5 km). That is the stand-in for the parent-city link the dump does not carry — Warnemünde's nearest bigger place is Rostock at 12 km so it stays, Christiania's is Copenhagen at 2 km so it goes. On a DK/DE/PL extract it keeps 18 districts of 159, all absorbed towns: Travemünde, Warnemünde, Vegesack, Harburg, Bergedorf, Dąbie.
 
@@ -137,6 +150,8 @@ Only Phase 1 uses Spark; Phases 2–5 are plain pandas/pyarrow/shapely. Phases c
 
 - A Parquet round-trip returns `h3_cells` as a **numpy array**, and `isinstance(ndarray, (list, tuple))` is False. Three places tested for list/tuple and so treated every Parquet-loaded harbour as cell-less: `_assign_ids` handed `_find_match` an empty set (Strategy A / Jaccard could never fire, in *any* run), and `_write_geojson` wrote `"h3_cells": []` — so a database built from either GeoJSON carried no cells and matching fell back to centroid distance alone, permanently. `pipeline.id_matching.cell_list()` is the coercion; use it for any stored cell list rather than an isinstance check.
 
+- `id_matching._geojson_to_df` reads `feature["properties"]` and **discards `feature.geometry`** (it derives a centroid, then drops the shape); `_load_existing_db` raises without a `harbour_id` column. Neither is reusable for reading a *foreign* harbour database — `utils/compare.py` carries its own loaders for that.
+
 - `phase4.outline_simplify_meters` must stay `0`: it is the only step that can pull the outline inside a trafficked cell, and a 10 m tolerance bites up to ~50 m — a whole res-11 cell.
 
 - Streamlit `AppTest`: `st.segmented_control` is reached via `at.button_group`, and `set_value()` needs a **scalar** — a list is silently ignored, so the test passes while the widget never changed.
@@ -152,6 +167,8 @@ Only Phase 1 uses Spark; Phases 2–5 are plain pandas/pyarrow/shapely. Phases c
 - Leaflet.Draw's edit toolbar only touches `L.Polygon` layers in the `FeatureGroup` handed to `Draw(feature_group=…)`. `folium.GeoJson` renders an `L.GeoJSON` group, whose contents the toolbar ignores — so the editable outline is rebuilt as `folium.Polygon` per part (`app._editable_polygons`). streamlit-folium then renames that group to `window.drawnItems` (a regex in its `_get_map_string`) and reports it back as `all_drawings`; if that rename ever stops matching, editing silently returns nothing.
 
 - folium's rendered page pulls Leaflet, Leaflet.Draw, jquery and three unused libraries (bootstrap, glyphicons, fontawesome/awesome-markers) from four public CDNs, so a private tile server alone does **not** make the GUI offline-capable — without Leaflet the map is a blank box. `utils/map_assets.use_local_assets()` repoints folium at `static/vendor/` and drops the three unused ones; `gui.local_map_assets` turns it on. The URLs are read out of `folium.Map`/`Draw.default_js`/`default_css`, never hardcoded, so a folium bump is picked up by re-running `scripts/vendor_map_assets.py`.
+
+- `use_local_assets()` mutates those **class attributes** and cannot be undone. A test that calls it poisons every folium map built later in the same session, `tests/test_gui.py`'s included — save and restore `folium.Map`/`Draw`'s `default_js`/`default_css` around it. It also takes any base URL: `use_local_assets("vendor")` renders relative hrefs, which is what makes a standalone HTML page work from any directory (the `/app/static/vendor` default is Streamlit-specific).
 
 - **jquery is not one of the droppable ones**, though nothing in `app.py` names it: folium's `Popup` template renders `$(`…`)[0]` to build its content, and every harbour layer gets a popup (`_add_harbour_layers`). Offline without it, the first popup raises `$ is not defined` inside the *single* inline `<script>` that also creates the map, the tile layer and the Draw control — so the whole map dies, not just the popup, and only offline. `tests/test_gui.py::test_local_assets_include_jquery_because_folium_popups_need_it` asserts both halves (the page uses `$(`, and jquery is linked), so it also flags the day folium stops needing it. Note the editable map builds no popups, so a test rendered with `editable=True` would not catch this.
 

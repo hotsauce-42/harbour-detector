@@ -257,8 +257,10 @@ def _add_geocoding(clusters: pd.DataFrame, config: Phase4Config) -> pd.DataFrame
     # minimises Euclidean distance over raw degrees, so at 58.9°N it reached
     # across the Skagerrak and put a harbour in the Swedish Koster archipelago
     # — 1.0 km from Nord-Koster — in Norway, from a town 14.8 km away.
-    # mode=2 → quiet batch mode
-    results = rg.search(coords, mode=2)
+    # mode=1 is the single-process tree. The default, mode=2, fork()s worker
+    # processes, and by now pyarrow has started threads — fork() from a
+    # threaded process can deadlock. A few thousand centroids need no pool.
+    results = rg.search(coords, mode=1, verbose=False)
 
     # Only the places near this run's harbours are worth indexing — the global
     # gazetteer is 5.2M rows, the box around a country's coastline is ~50k.

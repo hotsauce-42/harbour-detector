@@ -22,32 +22,32 @@
   "calibration": {
     "regime": "comparable",
     "headline": "iou",
-    "note": "Both databases draw harbours at the same scale (median area ratio 0.70). IoU is a fair quality number.",
-    "median_area_ratio": 0.7014416946500137,
-    "median_coverage_old": 0.7014416783616267,
-    "median_coverage_new": 0.9999999987172358,
-    "median_iou": 0.6975260189812548,
-    "n_pairs": 255
+    "note": "Both databases draw harbours at the same scale (median area ratio 1.00). IoU is a fair quality number.",
+    "median_area_ratio": 1.0,
+    "median_coverage_old": 0.9999999999922214,
+    "median_coverage_new": 0.9939806031601157,
+    "median_iou": 0.9819548830489567,
+    "n_pairs": 325
   },
   "scores": {
     "n_old": 331,
-    "n_new": 257,
-    "matched_old": 256,
-    "matched_new": 257,
-    "only_in_old": 75,
-    "only_in_new": 0,
-    "agreement_old": 0.7734138972809668,
-    "agreement_new": 1.0,
+    "n_new": 372,
+    "matched_old": 330,
+    "matched_new": 331,
+    "only_in_old": 1,
+    "only_in_new": 41,
+    "agreement_old": 0.9969788519637462,
+    "agreement_new": 0.8897849462365591,
     "cardinality": {
-      "1:0": 75,
-      "1:1": 255,
-      "1:N": 1
+      "0:1": 41,
+      "1:0": 1,
+      "1:1": 325,
+      "1:N": 1,
+      "N:M": 2
     },
     "n_tangled": 0
   },
   "only_in_old_reasons": {
-    "below_cluster_floor": 49,
-    "stops_below_cell_floor": 19,
-    "unpaired_nearby": 7
+    "below_cluster_floor": 1
   }
 }

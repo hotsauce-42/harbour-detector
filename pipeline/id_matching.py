@@ -937,10 +937,24 @@ def run_phase5(config: Phase5Config) -> tuple[str, str, str]:
     centroid_list:   list[dict]      = []
     manual = ManualState()
 
+    existing = None
     if config.existing_db_path:
-        existing = _load_existing_db(config.existing_db_path, config.s3_cfg)
+        # A configured path that is not there is the normal state of a first
+        # run — settings.yaml names data/existing_db/, which is gitignored and
+        # not in the images — so it means "no database", not a failed run.
+        try:
+            existing = _load_existing_db(config.existing_db_path, config.s3_cfg)
+        except FileNotFoundError:
+            logger.warning(
+                "Existing harbour DB %s not found — continuing without one, so "
+                "no harbour keeps a stored id or manual edit. Set "
+                "phase5.existing_db_path (or EXISTING_DB) if this is not a "
+                "first run.", config.existing_db_path,
+            )
+
+    if existing is not None:
         cell_index, centroid_list, manual = _build_indexes(existing)
-    else:
+    elif not config.existing_db_path:
         logger.info(
             "No existing harbour DB supplied — all IDs will be newly generated."
         )

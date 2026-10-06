@@ -26,6 +26,11 @@ phase1:
 
   # Stop segment grouping
   max_gap_minutes: 15               # gap between messages that still belongs to same stop
+  # Position change between consecutive slow/moored messages that ends a stop.
+  # The messages sent under way in between are filtered out before grouping,
+  # so a short move between berths leaves no time gap; this is what splits it.
+  # Isolated single-message GPS glitches are dropped first, not split on.
+  max_position_jump_meters: 300
   min_stop_duration_minutes: 30     # discard stops shorter than this
   min_messages_per_stop: 3          # discard stops with too few messages
   positional_variance_max_meters: 300  # discard stops where ship was still moving around

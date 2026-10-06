@@ -374,3 +374,43 @@ def test_positional_variance_rejects_drifting_vessel():
     )
     segments = _group_into_segments(df, config)
     assert len(segments) == 0
+
+
+def _berth_rows(start_minute: int, lat: float, n: int = 7) -> list[dict]:
+    """n moored messages 10 min apart at one berth — a 60-minute stop at n=7."""
+    return [{
+        "mmsi": 211000000,
+        "timestamp": _ts(0) + timedelta(minutes=start_minute + 10 * i),
+        "lat": lat, "lon": 10.0, "sog": 0.0, "nav_status": 5,
+    } for i in range(n)]
+
+
+def test_a_short_move_between_berths_splits_the_stop():
+    """
+    Two berths 2 km apart, 10 minutes under way between them. The under-way
+    messages never reach segmentation, so there is no time gap — only the
+    position jump separates the two stops. Without it they merged, failed the
+    variance check together, and both were lost.
+    """
+    rows = _berth_rows(0, 54.0) + _berth_rows(70, 54.018)
+    df = pd.DataFrame(rows)
+
+    segments = _group_into_segments(df, Phase1Config(raw_glob="", interim_dir=""))
+
+    assert len(segments) == 2
+    assert [round(s["lat"], 3) for s in segments] == [54.0, 54.018]
+    assert all(s["duration_minutes"] == 60 for s in segments)
+
+
+def test_a_single_gps_glitch_does_not_split_a_stop():
+    """One fix 2 km off, with its neighbours back at the berth, is noise."""
+    rows = _berth_rows(0, 54.0, n=13)
+    rows[6]["lat"] = 54.018
+    df = pd.DataFrame(rows)
+
+    segments = _group_into_segments(df, Phase1Config(raw_glob="", interim_dir=""))
+
+    assert len(segments) == 1
+    assert segments[0]["duration_minutes"] == 120
+    assert segments[0]["n_messages"] == 12
+    assert segments[0]["pos_variance_meters"] == 0

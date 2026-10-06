@@ -29,6 +29,9 @@ test:
     paths:
       - .cache/pip
   before_script:
+    # test_phase1.py's end-to-end tests start a real SparkSession, and
+    # python:3.12-slim ships no JVM — without this they error, not skip.
+    - apt-get update && apt-get install -y --no-install-recommends default-jdk-headless
     - pip install -r requirements.txt
   script:
     - pytest

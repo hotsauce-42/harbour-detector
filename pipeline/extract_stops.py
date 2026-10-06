@@ -21,7 +21,7 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 
-from utils.geo import positional_variance_meters
+from utils.geo import haversine_meters, positional_variance_meters
 from utils.s3 import build_s3_config
 
 # Output schema for stops.parquet — the contract Phase 2 reads back
@@ -66,6 +66,10 @@ class Phase1Config:
     moored_nav_statuses: list = field(default_factory=lambda: [1, 5])
     sog_threshold_knots: float = 0.5
     max_gap_minutes: float = 15.0
+    # A position change between consecutive candidate rows that ends a stop.
+    # Needed because the rows in between (the vessel under way) are filtered
+    # out before segmentation, so a short passage leaves no time gap.
+    max_position_jump_meters: float = 300.0
     min_stop_duration_minutes: float = 30.0
     min_messages_per_stop: int = 3
     positional_variance_max_meters: float = 300.0
@@ -101,6 +105,7 @@ class Phase1Config:
             moored_nav_statuses=p1.get("moored_nav_statuses", [1, 5]),
             sog_threshold_knots=p1.get("sog_threshold_knots", 0.5),
             max_gap_minutes=p1.get("max_gap_minutes", 15.0),
+            max_position_jump_meters=p1.get("max_position_jump_meters", 300.0),
             min_stop_duration_minutes=p1.get("min_stop_duration_minutes", 30.0),
             min_messages_per_stop=p1.get("min_messages_per_stop", 3),
             positional_variance_max_meters=p1.get(
@@ -148,6 +153,38 @@ def _parse_locode(destination: Optional[str]) -> Optional[str]:
 # Group rows into stop segments (per MMSI)
 # ---------------------------------------------------------------------------
 
+def _step_meters(vessel_df: pd.DataFrame) -> np.ndarray:
+    """Distance from each row to the previous one; 0 for the first row."""
+    lats = vessel_df["lat"].to_numpy(dtype=float)
+    lons = vessel_df["lon"].to_numpy(dtype=float)
+    steps = np.zeros(len(lats))
+    if len(lats) > 1:
+        steps[1:] = haversine_meters(lats[:-1], lons[:-1], lats[1:], lons[1:])
+    return steps
+
+
+def _position_outliers(vessel_df: pd.DataFrame, max_jump: float) -> np.ndarray:
+    """
+    Single-row GPS glitches: a row far from both neighbours while the
+    neighbours agree with each other.
+
+    Without this the jump test in `_group_into_segments` would cut a stop in
+    three at every glitch — and a piece that falls under the duration or
+    message minimum is lost. A real move does not look like this: the vessel
+    does not come back to where it was one message later.
+    """
+    outlier = np.zeros(len(vessel_df), dtype=bool)
+    if len(vessel_df) < 3:
+        return outlier
+    lats = vessel_df["lat"].to_numpy(dtype=float)
+    lons = vessel_df["lon"].to_numpy(dtype=float)
+    to_prev = haversine_meters(lats[:-2], lons[:-2], lats[1:-1], lons[1:-1])
+    to_next = haversine_meters(lats[1:-1], lons[1:-1], lats[2:], lons[2:])
+    across = haversine_meters(lats[:-2], lons[:-2], lats[2:], lons[2:])
+    outlier[1:-1] = (to_prev > max_jump) & (to_next > max_jump) & (across <= max_jump)
+    return outlier
+
+
 def _group_into_segments(vessel_df: pd.DataFrame, config: Phase1Config) -> list[dict]:
     """
     For a single vessel's candidate rows (already sorted by timestamp),
@@ -156,9 +193,23 @@ def _group_into_segments(vessel_df: pd.DataFrame, config: Phase1Config) -> list[
     """
     vessel_df = vessel_df.sort_values("timestamp").reset_index(drop=True)
 
-    # Mark segment boundaries where time gap exceeds max_gap
+    # Mark segment boundaries where the time gap exceeds max_gap, or where the
+    # vessel turns up somewhere else. Only slow/moored rows reach this point,
+    # so ten minutes under way between two berths leaves no time gap at all —
+    # without the jump test both stops merge into one segment, whose spread
+    # then fails the variance check and neither stop survives.
+    #
+    # A GPS glitch still proves the vessel was transmitting, so it counts for
+    # the time gap; only its position is ignored — for the jump test here and
+    # then for the stop itself, where it is dropped below.
     gaps = vessel_df["timestamp"].diff().dt.total_seconds().fillna(0) / 60
-    vessel_df["_seg"] = (gaps > config.max_gap_minutes).cumsum()
+    outlier = _position_outliers(vessel_df, config.max_position_jump_meters)
+    jumps = np.zeros(len(vessel_df))
+    jumps[~outlier] = _step_meters(vessel_df[~outlier])
+    vessel_df["_seg"] = (
+        (gaps > config.max_gap_minutes) | (jumps > config.max_position_jump_meters)
+    ).cumsum()
+    vessel_df = vessel_df[~outlier]
 
     segments = []
     for _, seg in vessel_df.groupby("_seg", sort=False):
