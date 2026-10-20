@@ -216,6 +216,37 @@ phase5:
   centroid_match_distance_meters: 500
   existing_db_path: "data/existing_db/harbours.geojson"
 
+phase6:
+  # Port areas: harbours grouped into the areas a vessel enters and leaves,
+  # written as port_areas.geojson / .parquet. Reads harbours.parquet and
+  # changes nothing in it. Every harbour lands in exactly one area — a harbour
+  # with no neighbours is an area of its own.
+  #
+  # Two harbours are linked when the gap between their outlines is at most
+  # max_gap_meters. Linking is transitive, so an area can span much further
+  # than one gap: on the reference run 1000 m joins Copenhagen and Hellerup,
+  # 2000 m chains the Gothenburg archipelago marinas together.
+  max_gap_meters: 1000
+  # Terminals sit further apart than marinas, so two harbours that are both
+  # commercial (cargo + tanker share of classified vessels, as in Phase 4's
+  # lock test) may be linked across this larger gap. Set it equal to
+  # max_gap_meters to switch it off. Harbour *size* does not work as the
+  # signal — a big port is many small harbours, not one big one.
+  commercial_max_gap_meters: 2500
+  commercial_min_share: 0.3
+  # Never link harbours whose nearest gazetteer places lie in different
+  # municipalities (DE admin4, DK admin2, SE kommun). Stops chaining at the
+  # border — Hellerup (Gentofte) stays apart from Copenhagen — but also
+  # splits a port that really does span municipalities (Rotterdam/Schiedam).
+  # Needs phase4.gazetteer_path with division codes; otherwise it stands down.
+  same_municipality: true
+  # Resolution of the area's h3_cells. 11 matches the harbours' own cells.
+  cell_resolution: 11
+  # Subtract land (phase4.coastline_path) from the areas as the last step,
+  # always keeping the harbours' own cells. false keeps the land the areas
+  # span — switched off while the result is being evaluated.
+  cut_land: false
+
 spark:
   app_name: "harbour-detector"
   # Production Spark/executor settings live in deploy/spark_job.yaml (sparkConf,

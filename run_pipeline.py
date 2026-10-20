@@ -37,6 +37,7 @@ def main() -> None:
     from pipeline.cluster_formation    import Phase3Config, run_phase3
     from pipeline.enrichment           import Phase4Config, run_phase4
     from pipeline.id_matching          import Phase5Config, run_phase5
+    from pipeline.port_areas           import Phase6Config, run_phase6
     from utils.s3    import build_s3_config
     from utils.spark import create_spark_session
 
@@ -65,10 +66,14 @@ def main() -> None:
     logger.info("━━━ Phase 5: ID matching + export ━━━")
     parquet_path, geojson_path, cells_path = run_phase5(Phase5Config.from_yaml(cfg))
 
+    logger.info("━━━ Phase 6: Port areas ━━━")
+    _, areas_path = run_phase6(Phase6Config.from_yaml(cfg))
+
     logger.info("Pipeline complete.")
     logger.info("  Parquet : %s", parquet_path)
     logger.info("  Outline : %s", geojson_path)
     logger.info("  Cells   : %s", cells_path)
+    logger.info("  Areas   : %s", areas_path)
 
 
 if __name__ == "__main__":

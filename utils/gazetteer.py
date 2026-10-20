@@ -409,6 +409,16 @@ class Gazetteer:
         """False when the source carries no administrative division codes."""
         return self._admin.active
 
+    def municipality_at(self, lat: float, lon: float) -> tuple | None:
+        """
+        The municipality of the place nearest a point, as an opaque key.
+
+        Two points with equal keys are in the same municipality. None means
+        "unknown" — the gazetteer carries no division codes — and must never
+        be compared as a value: two unknowns are not the same municipality.
+        """
+        return self._admin.key_at(lat, lon)
+
     def shares_municipality(self, lat: float, lon: float, place: Place) -> bool:
         """
         Is the point in the same municipality as `place`?

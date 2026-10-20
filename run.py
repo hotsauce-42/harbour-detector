@@ -81,6 +81,16 @@ def cmd_phase5(args, cfg: dict) -> None:
     print(f"  Cells   : {cells_path}")
 
 
+def cmd_phase6(args, cfg: dict) -> None:
+    from pipeline.port_areas import Phase6Config, run_phase6
+
+    config = Phase6Config.from_yaml(cfg)
+    parquet_path, geojson_path = run_phase6(config)
+    print("\nPhase 6 complete.")
+    print(f"  Parquet : {parquet_path}")
+    print(f"  Areas   : {geojson_path}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="harbour-detector",
@@ -107,6 +117,9 @@ def main() -> None:
                     help="Path to existing harbour database (.geojson or "
                          ".parquet) for ID matching")
 
+    subparsers.add_parser("phase6",
+                          help="Group harbours into port areas (H3 cells)")
+
     args = parser.parse_args()
     _setup_logging(args.verbose)
 
@@ -123,6 +136,8 @@ def main() -> None:
         cmd_phase4(args, cfg)
     elif args.command == "phase5":
         cmd_phase5(args, cfg)
+    elif args.command == "phase6":
+        cmd_phase6(args, cfg)
     else:
         parser.print_help()
         sys.exit(1)

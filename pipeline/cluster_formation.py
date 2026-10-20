@@ -25,7 +25,7 @@ import logging
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Hashable, Optional, TypeVar
 
 import h3
 import numpy as np
@@ -141,19 +141,23 @@ def _build_adjacency(hot_cells: set[str], ring_size: int = 1) -> dict[str, set[s
 # Step 2: connected components via BFS
 # ---------------------------------------------------------------------------
 
-def _connected_components(graph: dict[str, set[str]]) -> list[list[str]]:
+Node = TypeVar("Node", bound=Hashable)
+
+
+def _connected_components(graph: dict[Node, set[Node]]) -> list[list[Node]]:
     """
     Standard BFS connected-component finder.
-    Returns a list of components, each a list of cell strings.
+    Returns a list of components, each a list of nodes — H3 cell strings here,
+    harbour row positions in Phase 6.
     """
-    visited: set[str] = set()
-    components: list[list[str]] = []
+    visited: set[Node] = set()
+    components: list[list[Node]] = []
 
     for start in graph:
         if start in visited:
             continue
-        component: list[str] = []
-        queue: deque[str] = deque([start])
+        component: list[Node] = []
+        queue: deque[Node] = deque([start])
         while queue:
             node = queue.popleft()
             if node in visited:

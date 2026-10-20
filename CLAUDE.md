@@ -9,12 +9,19 @@ python3 -m venv ~/harbour-venv
 source ~/harbour-venv/bin/activate
 pip install -r requirements.txt
 
-# Run pipeline (all five phases in order)
+# Run pipeline (all six phases in order)
 python run.py phase1
 python run.py phase2
 python run.py phase3
 python run.py phase4
 python run.py phase5
+python run.py phase6    # port areas: harbours grouped into port_areas.geojson
+
+# HTML map of the port areas over the harbours (--compare adds a second run as
+# a hidden layer; --offline serves Leaflet from a vendor/ folder next to it)
+python3 scripts/map_port_areas.py
+python3 scripts/map_port_areas.py --compare /tmp/port_areas_cut.geojson --compare-label "with land cut"
+python3 scripts/map_port_areas.py --offline --tiles-url "https://tiles.internal/{z}/{x}/{y}.png" --tiles-attr "© internal"
 
 # Run a single phase with overrides
 python run.py phase1 --raw-glob "data/raw/2024/**/*.parquet"
@@ -32,6 +39,14 @@ PYSPARK_PYTHON=~/harbour-venv/bin/python3 pytest    # 8 errors -> 20 passed
 
 # Lint (line-length 88, E/F/W rules — config in ruff.toml)
 ruff check .
+
+# Ad-hoc scripts outside the repo root (e.g. a scratchpad) need PYTHONPATH=. to
+# import utils/pipeline; scripts/*.py insert the path themselves
+PYTHONPATH=. python3 /path/to/scratch.py
+
+# Trial Phases 2-5 without touching data/interim or data/output (the GUI saves
+# edits into the output GeoJSONs): copy the input parquet to a scratch dir first
+DATA__INTERIM_DIR=/tmp/x/interim DATA__OUTPUT_DIR=/tmp/x/output python3 run.py phase4
 
 # Build the nearest-city gazetteer (once; 421 MB download, ~50 s, 1 GB RSS)
 python3 scripts/prepare_gazetteer.py --countries DK SE DE NO PL
@@ -61,30 +76,32 @@ docker push myregistry.io/harbour-detector-enrich:1.0.0
 
 ## Architecture
 
-Five-phase pipeline: stop extraction (Phase 1, **Spark** — `applyInPandas` per MMSI) → H3 aggregation (Phase 2, pandas) → cluster formation (Phase 3, BFS with configurable `cluster_ring_size` to bridge gaps) → enrichment (Phase 4, shapely + gazetteer) → ID matching/export (Phase 5, deterministic `CC-hex8` IDs e.g. `DE-b8d7e3a2`).
+Six-phase pipeline: stop extraction (Phase 1, **Spark** — `applyInPandas` per MMSI) → H3 aggregation (Phase 2, pandas) → cluster formation (Phase 3, BFS with configurable `cluster_ring_size` to bridge gaps) → enrichment (Phase 4, shapely + gazetteer) → ID matching/export (Phase 5, deterministic `CC-hex8` IDs e.g. `DE-b8d7e3a2`) → port areas (Phase 6, `pipeline/port_areas.py`, harbours grouped into the areas a tracker tests vessels against).
 
 Phase 4's `nearest_city` comes from `utils/gazetteer.py`, not `reverse_geocoder`: a k-d tree in ECEF coordinates over a GeoNames dump prepared by `scripts/prepare_gazetteer.py` (`phase4.gazetteer_path`), with a population floor that scales with `n_cells`. `country_iso2` and `admin1` come from the same tree, with `reverse_geocoder` kept only as a fallback — see the gotcha below.
 
 Phase 5 writes three files: `harbours.geojson` (closed harbour outline), `harbours_cells.geojson` (exact H3-cell union), `harbours.parquet` (both, as `outline_wkt` / `geometry_wkt`). The outline is a morphological closing — `utils/geo.outline_polygon()`.
+
+Phase 6 reads `harbours.parquet` and writes `port_areas.geojson` / `.parquet`: every harbour in exactly one area (a lone harbour is its own area), geometry = the exact union of the area's `h3_cells`, `port_area_id` = `PA-{harbour_id of the largest member}`. It never modifies the harbours.
 
 Manual outline edits: the GUI stores what an operator drew in `manual_outline_wkt` and Phase 4's shape in `detected_outline_wkt`; `outline_wkt` is the union of the two (`utils/geo.merge_outlines()`, applied in `id_matching._apply_manual_outlines`). The drawn outline is a **floor** — a re-run can grow a harbour but never shrink it inside the drawn shape, so an inward edit is undone by the next run. `manual_outline_wkt` is never rewritten by the pipeline; it stays the frozen baseline. Outline edits are geometry only — cells, counts, centroid and the Phase 5 matching all stay derived from detected data.
 
 All config lives in `config/settings.yaml`, baked into both Docker images. Any key is overridable at runtime via `SECTION__KEY` env vars — no rebuild needed.
 
 Two images, mirroring the Spark / non-Spark split:
-- `Dockerfile.spark` → `harbour-detector-spark`: JVM + PySpark + S3A JARs, installs `requirements-spark.txt`. Default entrypoint `run_phase1.py`; carries the full code, so `run_pipeline.py` (all 5 phases, `deploy/job.yaml`) works too.
-- `Dockerfile.enrich` → `harbour-detector-enrich`: no JVM, no PySpark, installs `requirements-base.txt`. Default entrypoint `run_enrich.py`; `run.py phaseN` works for phases 2–5 only.
+- `Dockerfile.spark` → `harbour-detector-spark`: JVM + PySpark + S3A JARs, installs `requirements-spark.txt`. Default entrypoint `run_phase1.py`; carries the full code, so `run_pipeline.py` (all 6 phases, `deploy/job.yaml`) works too.
+- `Dockerfile.enrich` → `harbour-detector-enrich`: no JVM, no PySpark, installs `requirements-base.txt`. Default entrypoint `run_enrich.py`; `run.py phaseN` works for phases 2–6 only.
 
 Requirements split: `requirements-base.txt` (shared runtime, **exact pins** so both images agree on the libraries they exchange Parquet through) ← `requirements-spark.txt` (+ pyspark, Phase 1 only) ← `requirements.txt` (+ Streamlit GUI + pytest/ruff/mypy, local dev and CI). Bumping a shared pin means rebuilding both images from the same commit.
 
 Entry points:
 - `run.py` — local CLI (run phases individually)
-- `run_pipeline.py` — container entrypoint, all five phases sequentially (`deploy/job.yaml`)
+- `run_pipeline.py` — container entrypoint, all six phases sequentially (`deploy/job.yaml`)
 - `run_phase1.py` — container entrypoint, Phase 1 (Spark) only (`deploy/spark_job.yaml`)
-- `run_enrich.py` — container entrypoint, Phases 2–5 (no Spark) (`deploy/job_enrich.yaml`)
+- `run_enrich.py` — container entrypoint, Phases 2–6 (no Spark) (`deploy/job_enrich.yaml`)
 - `deploy/spark_job.yaml` — Spark Operator `SparkApplication` manifest (recommended for production)
 - `deploy/job.yaml` — plain Kubernetes Job manifest (small datasets / testing)
-- `deploy/job_enrich.yaml` — plain Job for Phases 2–5; pairs with `spark_job.yaml`, sequenced externally
+- `deploy/job_enrich.yaml` — plain Job for Phases 2–6; pairs with `spark_job.yaml`, sequenced externally
 - `deploy/secret.yaml` — S3 credentials Secret template
 
 Key utilities:
@@ -94,17 +111,21 @@ Key utilities:
 
 Phase 1 split: `pipeline/extract_stops.py` holds the per-vessel pandas logic (run as Spark UDF) and nothing else — no reading, no writing, so it imports no pyspark; `pipeline/extract_stops_spark.py` holds the Spark orchestration and is the only way to run Phase 1.
 
-Only Phase 1 uses Spark; Phases 2–5 are plain pandas/pyarrow/shapely. Phases communicate only through S3 (`interim_dir`/`output_dir`), so they can run in separate pods — `run_phase1.py` (Spark) then `run_enrich.py` (plain pod), ordered by an external orchestrator.
+Only Phase 1 uses Spark; Phases 2–6 are plain pandas/pyarrow/shapely. Phases communicate only through S3 (`interim_dir`/`output_dir`), so they can run in separate pods — `run_phase1.py` (Spark) then `run_enrich.py` (plain pod), ordered by an external orchestrator.
 
 ## Gotchas
 
 - `pathlib.Path` collapses `s3://bucket` → `s3:/bucket`. Never use `Path()` for S3 paths. Use `utils.s3.path_join()` for all path joins that may touch S3 URIs.
 
-- `utils/*` must not import `pipeline/*` — the dependency runs one way only (six pipeline modules import utils; nothing goes back). When a utils module needs pipeline logic, inject it: `utils.compare.components(..., find_components=…)` takes `pipeline.cluster_formation._connected_components` from the caller rather than importing it.
+- `utils/*` must not import `pipeline/*` — the dependency runs one way only (seven pipeline modules import utils; nothing goes back). When a utils module needs pipeline logic, inject it: `utils.compare.components(..., find_components=…)` takes `pipeline.cluster_formation._connected_components` from the caller rather than importing it.
 
 - Config resolution order (highest wins): env vars → `.env` file → `config/settings.yaml`. Any YAML key is overridable via `SECTION__KEY` env vars (e.g. `PHASE3__CLUSTER_RING_SIZE=5`, `S3__ENDPOINT_URL=http://minio:9000`). Legacy flat vars `RAW_GLOB`, `INTERIM_DIR`, `OUTPUT_DIR`, `EXISTING_DB` also still work. S3 credentials use the standard AWS env vars (`AWS_ACCESS_KEY_ID` etc.).
 
 - No geopandas, no GDAL. Geometry is shapely only and GeoJSON is written with `json.dumps` + `shapely.geometry.mapping`, so neither image installs `libgdal-dev` and the enrichment image installs no OS packages at all. Don't reach for `gpd.read_file`/`to_file` — adding geopandas back drags in fiona and the GDAL system library.
+
+- Adding a field to `ENRICHED_SCHEMA` breaks the hand-built enriched rows in `tests/test_outline_roundtrip.py` and `tests/test_phase5.py::_enriched_row` (`pa.table(..., schema=ENRICHED_SCHEMA)` demands every field) — add it there too.
+
+- A new tri-state manual verdict touches, in order: `utils/overrides.py` (key + `_tri_state` reader), `id_matching` (`OUTPUT_SCHEMA`, `ManualState`, `_build_indexes`, `_assign_ids`, an `_apply_manual_*`, `_write_parquet` special array, `_write_geojson`), `scripts/carry_manual_edits.py`, and `app.py` (`save_harbour_*`, `is_*`, panel). Missing one drops the verdict silently on some round-trip.
 
 - `pytest` cache is redirected to `/tmp` (`pytest.ini`) so test runs leave no state in the working tree.
 
@@ -161,6 +182,10 @@ Only Phase 1 uses Spark; Phases 2–5 are plain pandas/pyarrow/shapely. Phases c
 - A Parquet round-trip returns `h3_cells` as a **numpy array**, and `isinstance(ndarray, (list, tuple))` is False. Three places tested for list/tuple and so treated every Parquet-loaded harbour as cell-less: `_assign_ids` handed `_find_match` an empty set (Strategy A / Jaccard could never fire, in *any* run), and `_write_geojson` wrote `"h3_cells": []` — so a database built from either GeoJSON carried no cells and matching fell back to centroid distance alone, permanently. `pipeline.id_matching.cell_list()` is the coercion; use it for any stored cell list rather than an isinstance check.
 
 - `id_matching._geojson_to_df` reads `feature["properties"]` and **discards `feature.geometry`** (it derives a centroid, then drops the shape); `_load_existing_db` raises without a `harbour_id` column. Neither is reusable for reading a *foreign* harbour database — `utils/compare.py` carries its own loaders for that.
+
+- Phase 6 joins linked harbours with the **convex hull of each linked pair**, not with the morphological closing alone. A closing with radius r does *not* bridge two compact blobs whose gap is under 2r: the neck the dilation grows is thinner than the erosion that follows, so it is eroded away — on the reference run 81 of 330 areas stayed in pieces that way. The land cut comes after the hulls and is allowed to split an area again; such pieces are separated by real land, keep one `port_area_id`, and are reported, not repaired. Members' own outlines are always added back after the cut, since quay cells overlap OSM land.
+
+- Phase 6's gap does **not** scale with harbour size, and it was measured before rejecting it: a big port is many small harbours (largest reference outline ~540 m across), so a size-scaled gap merged 5 areas where a fixed 1 km merged 34. `commercial_max_gap_meters` (both harbours ≥ `commercial_min_share` cargo+tanker, Phase 4's `COMMERCIAL_COUNTS`) is the knob that does work. `same_municipality` is a veto only — it blocks a link when both keys are known and differ, never when one is None.
 
 - `phase4.outline_simplify_meters` must stay `0`: it is the only step that can pull the outline inside a trafficked cell, and a 10 m tolerance bites up to ~50 m — a whole res-11 cell.
 
