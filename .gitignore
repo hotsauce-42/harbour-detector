@@ -28,6 +28,7 @@ data/reference/
 data/existing_db/harbours.geojson
 data/output/harbours.parquet
 data/output/compare/
+data/output/quiz/
 
 # Keep the output directory itself
 !data/output/.gitkeep

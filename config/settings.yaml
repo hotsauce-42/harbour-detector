@@ -285,6 +285,10 @@ gui:
   # H3-cell companion file behind the map's "H3 cells" / "Both" toggle.
   # Defaults to output_file with a '_cells' suffix when left unset.
   cells_file: "data/output/harbours_cells.geojson"
+  # Harbour quiz (quiz.py): where each round's answers CSV goes, and how many
+  # random sites a round shows.
+  quiz_dir: "data/output/quiz"
+  quiz_round_size: 20
   default_tile: "OpenStreetMap"
   map_tiles:
     - name: "OpenStreetMap"

@@ -64,6 +64,12 @@ python3 scripts/compare_harbour_dbs.py --old data/existing_db/harbours.res8-back
 # Streamlit GUI
 streamlit run app.py
 
+# Harbour quiz: label 20 random sites (Harbour / Lock / Offshore / Not sure);
+# answers go to data/output/quiz/quiz_<ts>.csv (gui.quiz_dir), offline like app.py
+streamlit run quiz.py
+python3 scripts/apply_quiz_verdicts.py data/output/quiz/*.csv --dry-run   # -> manual_*_like
+python3 scripts/calibrate_offshore.py data/output/harbours.geojson --verdicts data/output/quiz/*.csv
+
 # Vendor Leaflet into static/vendor/ for offline use (needs internet once)
 python3 scripts/vendor_map_assets.py
 
@@ -140,6 +146,10 @@ Only Phase 1 uses Spark; Phases 2–6 are plain pandas/pyarrow/shapely. Phases c
 - To exercise Phase 1 without starting a JVM, call `_group_into_segments` / `_label_detection_method` / `_join_type5_data` directly — the same functions the Spark UDF runs, and much faster in tests. The end-to-end path (read → filter → UDF → write) needs a real session: `tests/test_phase1.py` has session-scoped `spark` / `spark_stops` fixtures that run the Spark job once over a fixture file (~35 s, `local[1]`).
 
 - `ruff check .` is clean — keep it that way; a single new E501 now stands out instead of hiding in a backlog.
+
+- `ruff check .` is not the only checker in use: the IDE's inspections also flag type mismatches against annotations and lambdas that capture a loop variable (bind it as a default, `lambda k, cell=cell: …`). Keep annotations honest — `_connected_components` is generic (`Node` TypeVar) for that reason.
+
+- `mypy` is not clean: 4 pre-existing errors in `utils/gazetteer.py`, `utils/coastline.py` and `pipeline/id_matching.py`. Judge a change by whether it adds new ones.
 
 - `country_iso2` comes from the gazetteer's **nearest place at floor 0** — not from the population-floored city, since a floor can select a town tens of km away that is across a border while the village beside the quay is not. `reverse_geocoder` remains the fallback when no place is within `max_city_dist_km`, which is what keeps a regionally-built gazetteer safe; Phase 4 logs a warning naming the count. This was forbidden until 2026-09-05 because `make_harbour_id()` is `{country_iso2}-{uuid5(centroid_h3_r8)[:8]}` — the country is *inside* the ID, so a country change re-IDs any harbour Phase 5 does not match against the existing DB. It was measured before switching: 1 country changed of 328 (a Koster-archipelago harbour rg placed in Norway from 14.8 km away) and **0 IDs**, because 255 of 328 matched the existing DB and no *unmatched* harbour changed country. That zero is a property of that dataset, not a guarantee — re-measure before assuming it elsewhere.
 
@@ -220,6 +230,10 @@ Only Phase 1 uses Spark; Phases 2–6 are plain pandas/pyarrow/shapely. Phases c
 - No `unzip` in the base shell — use Python's `zipfile` for archives.
 
 - Hadoop S3A JARs (`hadoop-aws-3.3.4.jar`, `aws-java-sdk-bundle-1.12.262.jar`) are downloaded into PySpark's `jars/` directory at Docker build time. If you upgrade PySpark, verify the bundled Hadoop version matches (`python3 -c "import pyspark; print(pyspark.__version__)"` then check `pyspark/jars/hadoop-client-runtime-*.jar`).
+
+- No matplotlib in the venv: check geometry visually with a folium HTML page (`scripts/map_port_areas.py`, or folium in a scratch script). Open WSL files in a Windows browser via `\\wsl$\Ubuntu\<path>`.
+
+- `phase6.cut_land` is `false` only while the port areas are being tuned (2026-10-21) — the code path is kept and tested. Reference run baseline (372 harbours, 1000/2500 m, guard on): 330 areas, 36 joining 78 harbours, 2 links vetoed; Copenhagen still splits into 4 areas at 1 km.
 
 - The base shell has no `python` on PATH — use `python3`. `ruff` and `pytest` are installed only inside `~/harbour-venv`, not the base shell; `source ~/harbour-venv/bin/activate` first (or invoke their full venv paths).
 

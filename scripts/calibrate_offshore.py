@@ -18,6 +18,8 @@ Usage:
     python3 scripts/calibrate_offshore.py data/output/harbours.parquet
     python3 scripts/calibrate_offshore.py data/output/harbours.geojson \\
         --offshore DE-1234abcd DK-5678ef01 --harbour DK-cdd3fe35
+    python3 scripts/calibrate_offshore.py data/output/harbours.geojson \\
+        --verdicts data/output/quiz/*.csv
 """
 
 import argparse
@@ -56,6 +58,23 @@ def load(path: Path) -> pd.DataFrame:
         out.loc[far, "coast_dist_km"] = math.inf
     out["label"] = [manual_offshore(row) for _, row in df.iterrows()]
     return out
+
+
+def quiz_examples(paths: list[Path]) -> tuple[set[str], set[str]]:
+    """
+    (offshore ids, harbour ids) from harbour-quiz CSVs, latest answer each.
+
+    A lock is not a waiting area, so for this threshold it counts as a
+    harbour; "not sure" counts as nothing.
+    """
+    if not paths:
+        return set(), set()
+    from quiz import read_answers  # imports streamlit — only when asked for
+
+    answers = read_answers(paths)
+    offshore = {h for h, r in answers.items() if r["answer"] == "offshore"}
+    harbour = {h for h, r in answers.items() if r["answer"] in ("harbour", "lock")}
+    return offshore, harbour
 
 
 def separating_range(df: pd.DataFrame) -> tuple[float, float] | None:
@@ -99,11 +118,19 @@ def main() -> int:
                         help="harbour ids confirmed as offshore waiting areas")
     parser.add_argument("--harbour", nargs="*", default=[], metavar="ID",
                         help="harbour ids confirmed as real harbours")
+    parser.add_argument("--verdicts", nargs="*", default=[], type=Path,
+                        metavar="CSV",
+                        help="harbour-quiz answers (quiz.py): offshore → "
+                             "offshore, harbour/lock → harbour; --offshore / "
+                             "--harbour ids still win")
     parser.add_argument("--thresholds", nargs="*", type=float,
                         default=list(DEFAULT_CANDIDATES), metavar="KM")
     args = parser.parse_args()
 
     df = load(args.path)
+    quiz_offshore, quiz_harbour = quiz_examples(args.verdicts)
+    df.loc[df["harbour_id"].isin(quiz_harbour), "label"] = False
+    df.loc[df["harbour_id"].isin(quiz_offshore), "label"] = True
     unknown = (set(args.offshore) | set(args.harbour)) - set(df["harbour_id"])
     if unknown:
         print(f"warning: not in {args.path.name}: {', '.join(sorted(unknown))}",
